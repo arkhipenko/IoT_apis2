@@ -14,6 +14,7 @@
 // ------------------
 #define _DEBUG_
 #define _TEST_
+#define _IOT_BLYNK_
 
 // TaskScheduler options:
 //#define _TASK_TIMECRITICAL    // Enable monitoring scheduling overruns
@@ -161,6 +162,7 @@ void cfgInit();
 void cfgLed();
 void ledOnDisable();
 void ntpUpdate();
+void ntpUpdateOnDisable();
 void connectedChk();
 void waterCallback();
 bool waterOnenable();
@@ -191,6 +193,11 @@ void resetDevice();
 // Task Scheduling
 // ---------------
 StatusRequest pulseComplete, measurementsReady, probeIdle, pageLoaded, sleepTime;
+
+#ifdef _IOT_BLYNK_
+StatusRequest reportToIoT;
+#endif
+
 Scheduler ts, hpts;
 
 #ifdef _TEST_
@@ -202,7 +209,7 @@ Task tTest          (TASK_SECOND * 10, TASK_FOREVER, &testTicker, &ts, true);
 Task tConfigure     (TASK_IMMEDIATE, TASK_ONCE, &cfgInit, &ts, true);
 Task tLedBlink      (TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ts, false, NULL, &ledOnDisable);
 Task tTimeout       (TASK_IMMEDIATE, TASK_FOREVER, NULL, &ts);
-Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts, false);
+Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts, false, NULL, &ntpUpdateOnDisable);
 Task tConnected     (TASK_SECOND, TASK_FOREVER, &connectedChk, &ts, false);
 
 Task tHandleClients (TASK_SECOND, TASK_FOREVER, &handleClientCallback, &ts, false);
@@ -224,6 +231,11 @@ Task tSleep         (&sleepCallback, &ts);
 Task tSleepTimeout  (SLEEP_TOUT, TASK_ONCE, &sleepTimeout, &ts, false);
 
 Task tReset         (&resetDevice, &ts);
+
+#ifdef _IOT_BLYNK_
+void  iot_report();
+Task tIotReport     (&iot_report, &ts);
+#endif
 
 // Parameters
 // ----------
@@ -811,6 +823,7 @@ unsigned long sendNTPpacket(IPAddress& address)
   udp.beginPacket(address, 123); //NTP requests are to port 123
   udp.write(packetBuffer, NTP_PACKET_SIZE);
   udp.endPacket();
+  yield();
   //  delay(100);
 }
 
@@ -842,7 +855,7 @@ void cfgChkNTP() {
       udp.stop();
     }
     else {
-      delay (100);
+      //      delay (100);
     }
   }
 }
@@ -897,6 +910,7 @@ bool doNtpUpdateCheck() {
   Serial.println(F(": doNtpUpdateCheck."));
 #endif
 
+  yield();
   int cb = udp.parsePacket();
   if (cb) {
 #ifdef _DEBUG_
@@ -969,6 +983,10 @@ void ntpUpdate() {
   else {
     //    delay(100);
   }
+}
+
+void ntpUpdateOnDisable() {
+  sleepTime.signal();
 }
 
 bool globRet;
@@ -1084,7 +1102,7 @@ void cfgFinish() {  // WiFi config successful
 
 
   server.begin();
-//  server.setNoDelay(true);  // underlying wifiserver is not exposed
+  //  server.setNoDelay(true);  // underlying wifiserver is not exposed
 
   //  MDNS.addService("http", "tcp", LOCAL_HTTP_PORT);
 
@@ -1099,14 +1117,16 @@ void ticker() {
 #ifdef _DEBUG_ || _TEST_
   Serial.println();
   Serial.print(millis());
-  Serial.println(F(": ticker."));
+  Serial.println(F(": TICKER"));
+  Serial.println(F("================"));
+  Serial.println();
 #endif
 
   tickTime = now();
 
   if ( parameters.powersave ) {
     tSleepTimeout.restartDelayed();
-    sleepTime.setWaiting(2);
+    sleepTime.setWaiting(3);
     tSleep.waitFor(&sleepTime);
   }
 
@@ -1118,18 +1138,30 @@ void ticker() {
 
     ledOnDisable();
     sleepTime.signal();
-    return;
+    //    return;
   }
 
-  if ( !tWater.isEnabled() ) {
 
+  if ( !tWater.isEnabled() ) {
     // Launch measurment and watering
     led();
     measureRestart();
   }
 
-  if ( connectedToAP )
-    tNtpUpdater.restart();
+
+  if ( connectedToAP ) {
+    tNtpUpdater.restartDelayed(TASK_MINUTE * 2);
+
+#ifdef _IOT_BLYNK_
+    if ( connectedToAP ) {
+      reportToIoT.setWaiting();
+      tIotReport.waitFor(&reportToIoT);
+    }
+#endif
+
+  }
+  else
+    sleepTime.signal(); // since NTP update was not requested, signal completion
 }
 
 void sleepTimeout() {
@@ -1222,8 +1254,11 @@ void onDisconnected(const WiFiEventStationModeDisconnected& event) {
   Serial.println(F(": onDisconnected."));
 #endif
 
-  WiFi.disconnect();
-  tConnected.restartDelayed(CONNECT_TIMEOUT * TASK_SECOND);
+  if ( connectedToAP ) {
+    WiFi.disconnect();
+    tConnected.restartDelayed(TASK_SECOND);
+    connectedToAP = false;
+  }
 }
 
 
@@ -1269,6 +1304,7 @@ void connectedChk() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    connectedToAP = true;
     tTimeout.disable();
     tConnected.disable();
   }
@@ -1504,6 +1540,7 @@ void measureCallback() {
     tMeasureRestart.disable();
     ledOff();
     sleepTime.signal();
+    reportToIoT.signal();
   }
 }
 
@@ -1582,6 +1619,7 @@ void waterOnDisable() {
   tMeasureRestart.disable();
   tLedBlink.disable();
   sleepTime.signal();
+  reportToIoT.signal();
 }
 
 
@@ -2287,6 +2325,125 @@ void handleFileUpload() {
       fsUploadFile.close();
     Serial.print("handleFileUpload Size: "); Serial.println(upload.totalSize);
   }
+}
+
+#endif
+
+
+#ifdef _IOT_BLYNK_
+
+const char blynk_auth[] = "9955f87265f04846a680753c5d787fd0";
+const char* blynk_host = "blynk-cloud.com";
+unsigned int blynk_port = 8080;
+WiFiClient blynk_client;
+
+bool httpRequest(const String& method,
+                 const String& request,
+                 String&       response)
+{
+#ifdef _DEBUG_
+  Serial.print(F("Connecting to "));
+  Serial.print(blynk_host);
+  Serial.print(":");
+  Serial.print(blynk_port);
+  Serial.print("... ");
+#endif
+  if (blynk_client.connect(blynk_host, blynk_port)) {
+#ifdef _DEBUG_
+    Serial.println("OK");
+#endif
+  } else {
+#ifdef _DEBUG_
+    Serial.println("failed");
+#endif
+    return false;
+  }
+
+  blynk_client.print(method); blynk_client.println(F(" HTTP/1.1"));
+  blynk_client.print(F("Host: ")); blynk_client.println(blynk_host);
+  blynk_client.println(F("Connection: close"));
+  if (request.length()) {
+    blynk_client.println(F("Content-Type: application/json"));
+    blynk_client.print(F("Content-Length: ")); blynk_client.println(request.length());
+    blynk_client.println();
+    blynk_client.print(request);
+  } else {
+    blynk_client.println();
+  }
+
+  //Serial.println("Waiting response");
+  int timeout = millis() + 5000;
+  while (blynk_client.available() == 0) {
+    if (timeout - millis() < 0) {
+      Serial.println(">>> Client Timeout !");
+      blynk_client.stop();
+      return false;
+    }
+  }
+
+  //Serial.println("Reading response");
+  int contentLength = -1;
+  while (blynk_client.available()) {
+    String line = blynk_client.readStringUntil('\n');
+    line.trim();
+    line.toLowerCase();
+    if (line.startsWith("content-length:")) {
+      contentLength = line.substring(line.lastIndexOf(':') + 1).toInt();
+    } else if (line.length() == 0) {
+      break;
+    }
+  }
+
+  //Serial.println("Reading response body");
+  response = "";
+  response.reserve(contentLength + 1);
+  while (response.length() < contentLength && blynk_client.connected()) {
+    while (blynk_client.available()) {
+      char c = blynk_client.read();
+      response += c;
+    }
+  }
+  blynk_client.stop();
+  return true;
+}
+
+
+void iot_report() {
+  String putData = String("[\"") + currentHumidity + "\"]";
+  String response;
+
+  if (httpRequest(String("PUT /") + blynk_auth + "/update/V0", putData, response)) {
+    if (response.length() != 0) {
+
+#ifdef _DEBUG_
+      Serial.print("WARNING: ");
+      Serial.println(response);
+#endif
+    }
+  }
+
+  putData = String("[\"") + currentWaterLevel + "\"]";
+  if (httpRequest(String("PUT /") + blynk_auth + "/update/V1", putData, response)) {
+    if (response.length() != 0) {
+
+#ifdef _DEBUG_
+      Serial.print("WARNING: ");
+      Serial.println(response);
+#endif
+    }
+  }
+
+  //  putData = String("[\"") + currentHumidity + "\"]";
+  //  if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
+  //    if (response.length() != 0) {
+  //
+  //#ifdef _DEBUG_
+  //      Serial.print("WARNING: ");
+  //      Serial.println(response);
+  //#endif
+  //    }
+  //  }
+
 }
 
 #endif
