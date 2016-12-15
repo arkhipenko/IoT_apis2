@@ -1,0 +1,36 @@
+<!DOCTYPE html><html lang="en"> <head> <meta charset="utf-8"> <title>Home Plant Configuration - Watering</title> <link rel="icon" href="plant.png" type="image/png" sizes="16x16"> <style type="text/css"> </style></head> <body>  <div align="center"> <span style="font-family: Georgia; font-weight: normal; font-style: normal; text-decoration: none;"> <h2>Home Plant Configuration - Watering</h2> </span>  <div align="center"><img src="confwatering.jpg" width="200" height="160" alt="" title="" /></div> <div align="center"> <br />
+<!-- ###0001-DATETIME### -->
+2016-12-05&nbsp;7:43 PM
+</div><br /><div style=" text-align: left; text-indent: 0px; padding: 0px 0px 0px 0px; margin: 0px 0px 0px 0px;"><div align="center"><table width="50%" border="0" cellpadding="2" cellspacing="2" style="border-width: 0px; background-color: #ffffff;"><tr valign="top"><td style="border-width : 0px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;"><b>Watering run parameters:</b><br /></td><td style="border-width : 0px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><br /></td></tr><tr valign="top" style="background-color: #dcdcdc"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Start watering at:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form action="confwatersave" method="post">
+<!-- ###0006-NEEDWATER### -->
+<input type="text" value="65"
+name="needwater" maxlength="3" style="text-align: right;width:70px"> %<br></input></td></tr><tr valign="top"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Run pump for:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0007-WATERTIME### -->
+<input type="text" value="20"
+name="watertime" maxlength="5" style="text-align: right;width:62px"> sec<br></input></td></tr><tr valign="top" style="background-color: #dcdcdc"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Stop watering at:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0008-STOPWTER### -->
+<input type="text" value="75"
+name="stopwater" maxlength="3" style="text-align: right;width:70px"> %<br></input></td></tr><tr valign="top"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Saturate for:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0009-SATURATE### -->
+<input type="text" value="1"
+name="saturate" maxlength="5" style="text-align: right;width:60px"> min<br></input></td></tr><tr valign="top" style="background-color: #dcdcdc"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Repeat watering:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0010-RETRIES### -->
+<input type="text" value="4"
+name="retries" maxlength="5" style="text-align: right;width:40px"> time(s)<br></input></td></tr><tr valign="top"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Do not water later than:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0011-GOTOSLEEP### -->
+<input type="text" value="22"
+name="gotosleep" maxlength="5" style="text-align: right;width:68px">&nbsp&nbsphr<br></input></td></tr><tr valign="top" style="background-color: #dcdcdc"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Do not water earlier than:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0012-WAKEUP### -->
+<input type="text" value="9"
+name="wakeup" maxlength="5" style="text-align: right;width:68px">&nbsp&nbsphr<br></input></td></tr><tr valign="top"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">On weekends, delay morning watering by:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right">
+<!-- ###0013-WEEKENDADJ### -->
+<input type="text" value="2"
+name="weekendadj" maxlength="5" style="text-align: right;width:40px"> hour(s)<br></input></td></tr></table> <br /><table width="50%" border="0" cellpadding="2" cellspacing="2" style="border-width: 0px; background-color: #ffffff;"><tr valign="top"><td style="border-width : 0px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;"><b>Water container parameters:</b><br /></td><td style="border-width : 0px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><br /></td></tr><tr valign="top" style="background-color: #dcdcdc"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Water container depth, empty:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0020-WLDEPTH### -->
+<input type="text" value="230"
+name="wldepth" maxlength="5" style="text-align: right;width:62px"> mm<br></input></td></tr><tr valign="top"><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 65%;">Minimal water level:<br /></td><td style="border-width : 1px; border-color : #000000 #000000 #000000 #000000; border-style: solid; width: 35%; text-align: right"><form name="confwater">
+<!-- ###0021-MINLEVEL### -->
+<input type="text" value="30"
+name="minlevel" maxlength="5" style="text-align: right;width:62px"> mm<br></input></td></tr></table> <br /><input type="submit" name="confwatersave" value="save"></FORM></div></div></div> 
+<!-- font definition -->
+ </body></html>
