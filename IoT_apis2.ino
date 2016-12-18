@@ -1,12 +1,15 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 0.1.0
+   Code Version 1.0.0
    Parameters Version 01
 
   Change Log:
   2016-11-29
     v0.1.0 - work started
+
+  2016-12-17
+    v1.0.0 - First release
 
   ----------------------------------------*/
 
@@ -18,6 +21,9 @@
 // IoT framework selection
 // -----------------------
 #define _IOT_BLYNK_
+
+// INCLUDES
+// ========
 
 // TaskScheduler options:
 //#define _TASK_TIMECRITICAL    // Enable monitoring scheduling overruns
@@ -43,56 +49,61 @@
 #include <DNSServer.h>
 #include <FS.h>
 
+
+// DEFINES AND GLOBAL VARIABLES
+// ============================
+
 // Natural constants
-#define US_TO_MM_FACTOR  (100000/583)
-#define STATIC_TIME      1451606400UL
-#define SD3              10
+#define US_TO_MM_FACTOR (100000/583)
+#define STATIC_TIME     1451606400UL
+#define SD3             10
 
 // Watering parameter defaults
 // ---------------------------
-#define RETRIES 2
-#define RETRIES_MIN 1
-#define RETRIES_MAX 10
+#define RETRIES        2
+#define RETRIES_MIN    1
+#define RETRIES_MAX    10
 
 // Time to run pump within one water run
-#define WATERTIME 20 //Seconds
-#define WATERTIME_MIN 5 //Seconds
-#define WATERTIME_MAX 120 //Seconds
+#define WATERTIME      20 //Seconds
+#define WATERTIME_MIN  5 //Seconds
+#define WATERTIME_MAX  120 //Seconds
 
 // Time to saturate
-#define SATURATE 1 // 1 minute
-#define SATURATE_MIN 1 // 1 minute
-#define SATURATE_MAX 90 // 10 minutes
+#define SATURATE       1 // 1 minute
+#define SATURATE_MIN   1 // 1 minute
+#define SATURATE_MAX   90 // 10 minutes
 
 // % soil humidity to start pumping (low threshold)
-#define NEEDWATER 65 // % to start pumping
-#define NEEDWATER_MIN 20 // % to start pumping
-#define NEEDWATER_MAX 75 // % to start pumping
+#define NEEDWATER      65 // % to start pumping
+#define NEEDWATER_MIN  20 // % to start pumping
+#define NEEDWATER_MAX  75 // % to start pumping
 
 // % soil humidity to stop pumping (high threshold)
-#define STOPWATER 70 // % to stop pumping
-#define STOPWATER_MIN 25 // % to stop pumping
-#define STOPWATER_MAX 90 // % to stop pumping
+#define STOPWATER      70 // % to stop pumping
+#define STOPWATER_MIN  25 // % to stop pumping
+#define STOPWATER_MAX  90 // % to stop pumping
 
 // Hour of the day to "go to sleep" (i.e., do not operate after this hour)
-#define GOTOSLEEP 22 // hour to go to sleep
+#define GOTOSLEEP      22 // hour to go to sleep
 #define GOTOSLEEP_MIN  0 // hour to go to sleep
-#define GOTOSLEEP_MAX 24 // hour to go to sleep
+#define GOTOSLEEP_MAX  24 // hour to go to sleep
 
 // Hour of the day to "wake up" (i.e., operate after this hour)
-#define WAKEUP    7 // hour to wake up
-#define WAKEUP_MIN  0 // hour to wake up
-#define WAKEUP_MAX 24 // hour to wake up
+#define WAKEUP         7 // hour to wake up
+#define WAKEUP_MIN     0 // hour to wake up
+#define WAKEUP_MAX     24 // hour to wake up
 
 // Number of hours to add to wake up time on a weekend
-#define WEEKENDADJ  3  // number of hours to add for the wakeup on a weekend
+#define WEEKENDADJ      3  // number of hours to add for the wakeup on a weekend
 #define WEEKENDADJ_MIN  0  // number of hours to add for the wakeup on a weekend
 #define WEEKENDADJ_MAX  12  // number of hours to add for the wakeup on a weekend
 
-#define WLDEPTH   240 // mm, total depth of the water bucket
-#define WLLOW     30  // mm, low level of water bucket
+#define WLDEPTH         240 // mm, total depth of the water bucket
+#define WLLOW           30  // mm, low level of water bucket
 
 // Wifi
+// ----
 #define CONNECT_TIMEOUT 30  //seconds
 #define NTP_TIMEOUT     20  //seconds
 #define CONNECT_BLINK   260 // ms
@@ -115,7 +126,6 @@
 #define RGBLED_GREEN_PIN  D1   // D1 nodemcu pin
 #define RGBLED_BLUE_PIN   D6   // D6 nodemcu pin
 
-//#define LEDON             PWMRANGE // full range
 #define   LEDON           1
 #define   LEDOFF          0
 #define   LEDSTAY         (-1)
@@ -129,41 +139,36 @@
 
 
 // EEPROM token for parameters
-const char *CToken = "APIS00\0"; // Eeprom token: Automatic Plant Irrigation System
-//const char *CSsid  = "Verizon-MiFi6620L-3D38-AMA\0";
-//const char *CPwd   = "21613718\0";
-const char *CSsid  = "beta_n\0";
-const char *CPwd   = "460w20thstret1973b\0";
-//const char *CSsid  = "donotconnect";
-//const char *CPwd   = "8182838485";
+const char *CToken = "APIS01\0"; // Eeprom token: Automatic Plant Irrigation System
+const char *CSsid  = "wifi_network";
+const char *CPwd   = "wifi_password";
 const char *CDSsid  = "Plant_";
 const char *CDPwd   = "changeme!";
 const char *CHost  = "plant.io";
 String ssid, pwd;
 
-//long currentWaterLevel;
 #ifndef _TEST_
-#define  TICKER     TASK_HOUR
-#define  SLEEP_TOUT (TASK_MINUTE * 2)
+#define  TICKER          TASK_HOUR
+#define  SLEEP_TOUT      TASK_MINUTE
 
 int   currentHumidity = 0;
 int   currentWaterLevel = 0;
 #else
-#define  TICKER     (TASK_MINUTE * 3)
-#define  SLEEP_TOUT TASK_MINUTE
+#define  TICKER          (TASK_MINUTE * 3)
+#define  SLEEP_TOUT      TASK_MINUTE
 
 int   currentHumidity = 60;
 int   currentWaterLevel = 200;
 #endif
 
-#define TMEASURE_WATERTIME   5  // measure every 5 seconds while watering
-#define MEASURE_PRIME        5  // 5 seconds
-#define MEASURE_TIMES        3  // measure this number of times to average the value
+#define TMEASURE_WATERTIME  5  // measure every 5 seconds while watering
+#define MEASURE_PRIME       5  // 5 seconds
+#define MEASURE_TIMES       3  // measure this number of times to average the value
 
 const char* CWakeReasonSleep = "Deep-Sleep Wake";
 const char* CWakeReasonReset = "External System";
 
-// Forward definition of all callback methods is now required by v1.6.6
+// Forward definition of all callback methods is now required as of v1.6.6
 // ---------------------------------------------------------------------
 void cfgInit();
 void cfgLed();
@@ -177,7 +182,6 @@ bool waterOnenable();
 void waterOndisable();
 void measureCallback();
 void measureWL();
-bool measureWLOnEnable();
 void measureMS();
 void measureMSOnDisable();
 void ticker();
@@ -195,7 +199,6 @@ void serverHandleRoot();
 void serverHandleNotFound();
 
 void sleepCallback();
-//void sleepTimeout();
 
 void resetDevice();
 void  iot_report();
@@ -215,17 +218,17 @@ Task tTest          (TASK_SECOND * 10, TASK_FOREVER, &testTicker, &ts, true);
 Task tConfigure     (TASK_IMMEDIATE, TASK_ONCE, &cfgInit, &ts, true);
 Task tLedBlink      (TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ts, false, &ledOnEnable, &ledOnDisable);
 Task tTimeout       (TASK_IMMEDIATE, TASK_FOREVER, NULL, &ts);
-Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts, false); //, NULL, &ntpUpdateOnDisable);
+Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts, false);
 Task tConnected     (TASK_SECOND, TASK_FOREVER, &connectedChk, &ts, false);
 
 Task tHandleClients (TASK_SECOND, TASK_FOREVER, &handleClientCallback, &ts, false);
 
 Task tTicker        (TICKER, TASK_FOREVER, &ticker, &ts, false);
 
-Task tMeasure       (&measureCallback, &ts); //, NULL, &measureOnDisable);
+Task tMeasure       (&measureCallback, &ts);
 Task tMeasureRestart(&measureRestart, &ts);
 
-Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false, &measureWLOnEnable, NULL);
+Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false); //, &measureWLOnEnable, NULL);
 Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, NULL, &measureMSOnDisable);
 
 Task tWater         (TASK_IMMEDIATE, TASK_ONCE, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
@@ -234,10 +237,8 @@ Task tPing          (TASK_IMMEDIATE, TASK_ONCE, &pingTOut, &hpts, false);
 Task tWaterLevel    (&waterLevelCalc, &hpts);
 
 Task tSleep         (&sleepCallback, &ts);
-//Task tSleepTimeout  (SLEEP_TOUT, TASK_ONCE, NULL, &ts, false);
 
 Task tIotReport     (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
-//Task tIotReport2    (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
 
 Task tReset         (&resetDevice, &ts);
 
@@ -288,7 +289,8 @@ typedef struct {
   // Total of 16 bytes
 } TTimeStored;
 
-TTimeStored    time_restore;
+TTimeStored   time_restore;
+
 #define       MAGIC_NUMBER  1234567890UL
 #define       WAKE_DELAY    1            // 3 seconds to wake up 
 
@@ -317,14 +319,13 @@ Timezone myTZ(myDST, mySTD);
 
 /* Don't hardwire the IP address or we won't get the benefits of the pool.
     Lookup the IP address for the host name instead */
-//IPAddress timeServer(129, 6, 15, 28); // time.nist.gov NTP server
-IPAddress timeServerIP; // time.nist.gov NTP server address
-const char* ntpServerName = "time.nist.gov";
-byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
+IPAddress     timeServerIP; // time.nist.gov NTP server address
+const char*   ntpServerName = "time.nist.gov";
+byte          packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
 
 // A UDP instance to let us send and receive packets over UDP
 WiFiUDP udp;
-//unsigned int localNtpPort = 2390;      // local port to listen for UDP packets
+
 #define LOCAL_NTP_PORT  2390
 #define LOCAL_HTTP_PORT 80
 #define LOCAL_DNS_PORT  53
@@ -344,7 +345,7 @@ unsigned long ledOnDuration, ledOffDuration;
 
 // Execution
 bool connectedToAP = false; // if connected to AP, presumably you can query and set the time
-bool runningAsAP = false;
+bool runningAsAP   = false;
 // and properly destinguish between night and day.
 // Otherwise, the monitoring needs to run once a day
 // from the time the device was started assuming that happens
@@ -368,6 +369,10 @@ volatile bool clockStarted = false;
 // ------------------------------------------------------------------
 
 #ifdef _TEST_
+
+/**
+   A Test function to make sure 3 way LED works
+*/
 void TESTLEDS() {
   digitalWrite(RGBLED_RED_PIN, HIGH); delay(1000); digitalWrite(RGBLED_RED_PIN, LOW); delay(1000);
   digitalWrite(RGBLED_GREEN_PIN, HIGH); delay(1000); digitalWrite(RGBLED_GREEN_PIN, LOW); delay(1000);
@@ -376,6 +381,9 @@ void TESTLEDS() {
   ledOff();
 }
 
+/**
+   If compiled with _TEST_ definition will simulate soil humidity changes for testing purposes
+*/
 void testTicker() {
   long i = tTest.getRunCounter();
 
@@ -409,9 +417,13 @@ void testTicker() {
 }
 #endif
 
+
 // Utility methods
 // ---------------
 
+/**
+   Initiates interrupt driven ultrasonic distance measurement
+*/
 void ping(unsigned long aTimeout) {  // in millis
 
 #ifdef _TEST_
@@ -429,11 +441,14 @@ void ping(unsigned long aTimeout) {  // in millis
   clockStarted = false;
   delayMicroseconds(10);
   digitalWrite(SR04_TRIGGER_PIN, LOW);
-  //  pingDistance = pulseIn(SR04_ECHO_PIN, HIGH) * 170L / 10000L;
   attachInterrupt(SR04_ECHO_PIN, &pingStartStopClock, CHANGE);
   tPing.restartDelayed();
 }
 
+/**
+   This method is called on the leading and falling edge of the ultrasonic wave
+   We take two microseconds readings for later distance calculation
+*/
 void pingStartStopClock() {
   if (clockStarted) {
     pulseStop = micros();
@@ -444,13 +459,15 @@ void pingStartStopClock() {
   }
   else {
     pulseStart = micros();
-    //    detachInterrupt(SR04_ECHO_PIN);
-    //    attachInterrupt(SR04_ECHO_PIN, &pingStartStopClock, FALLING);
     clockStarted = true;
     tPing.restartDelayed();
   }
 }
 
+/**
+   Utrasonic distance measurment timeout method.
+   If called, the distance is beyond our range
+*/
 void pingTOut() {
   if (pulseBusy) {
     clockStarted = true;
@@ -459,10 +476,15 @@ void pingTOut() {
   pulseTimeout = true;
 }
 
-#define WL_SAMPLES  5
-long  wlData[WL_SAMPLES];
-avgFilter wl(WL_SAMPLES, wlData);
 
+#define WL_SAMPLES  5
+long  wlData[WL_SAMPLES];           // Water level is averaged based on 5 measurements
+avgFilter wl(WL_SAMPLES, wlData);   // Average filter for water level measurements
+
+/**
+   Calculates water level based on the distance to water surface
+   measured by the utrasonic sensor
+*/
 void waterLevelCalc() {
   long cwl = 0;
 
@@ -501,30 +523,50 @@ void waterLevelCalc() {
 }
 
 
-// Motor
+// Pump Motor methods
+// ------------------
+
+/**
+   Turns pump motor on/off depending on the state
+
+   @param: aState: true - turn the pump on; false - turn the pump off
+
+*/
 void motorState(bool aState) {
   digitalWrite(PUMP_PWR_PIN, aState ? HIGH : LOW);
 }
 
+/**
+   Turn pump on
+*/
 void motorOn() {
   motorState(true);
 }
 
+/**
+   Turn pump of
+*/
 void motorOff() {
   motorState(false);
 }
 
-// Probes
-//#define MOISTURE_PWR_PIN  13  // D7
-//#define MOISTURE_GND_PIN  15  // D8
+/**
+   Turns the power on soil humidity probe ON
+*/
 void probePowerOn() {
   digitalWrite(MOISTURE_PWR_PIN, HIGH);
 }
 
+/**
+   Turns the power on soil humidity probe OFF
+*/
 void probePowerOff() {
   digitalWrite(MOISTURE_PWR_PIN, LOW);
 }
 
+/**
+   Retruns TRUE if there is water in under the flower pot
+*/
 bool hasLeaked() {
 
   pinMode(LEAK_PIN, INPUT_PULLUP);
@@ -544,10 +586,16 @@ bool hasLeaked() {
   return hasleaked;
 }
 
+/**
+   Returns TRUE if conditions permit watering run
+*/
 bool canWater() {
   return !( hasLeaked() || currentWaterLevel < parameters.wl_low || isNight() );
 }
 
+/**
+   Returns TRUE if it is night time according to clock and night parameters
+*/
 bool isNight() {
 
   nightMode = false;
@@ -580,7 +628,16 @@ bool isNight() {
   return nightMode;
 }
 
-// 3 Color LED
+// 3 Color LED methods
+// -------------------
+
+/**
+   Displays appropriate color on the LED
+
+   @param: aR - Reg LED component. LEDOFF to turn LED color off; LEDSTAY to keep current, LEDON to turn on
+   @param: aG - Green LED component. LEDOFF to turn LED color off; LEDSTAY to keep current, LEDON to turn on
+   @param: aB - Blue LED component. LEDOFF to turn LED color off; LEDSTAY to keep current, LEDON to turn on
+*/
 int rgbRed = LEDOFF, rgbGreen = LEDOFF, rgbBlue = LEDOFF;
 void led(int aR = LEDSTAY, int aG = LEDSTAY, int aB = LEDSTAY) {
   if (aR >= 0) rgbRed = aR;
@@ -603,12 +660,20 @@ void led(int aR = LEDSTAY, int aG = LEDSTAY, int aB = LEDSTAY) {
   }
 }
 
+/**
+   Turns all LED colors OFF
+*/
 void ledOff() {
   led(LEDOFF, LEDOFF, LEDOFF);
 }
 
 
-// Parameters
+// Parameter methods
+// -----------------
+
+/**
+   Loads parameters from the EEPROM
+*/
 void loadParameters() {
 
 #ifdef _DEBUG_
@@ -648,6 +713,9 @@ void loadParameters() {
   }
 }
 
+/**
+   Saves parameters to the EEPROM
+*/
 void saveParameters() {
 
 #ifdef _DEBUG_
@@ -676,7 +744,14 @@ void saveParameters() {
 }
 
 
-// Configuration
+// Configuration methods
+// ---------------------
+
+/**
+   Initiates connection to the wireless network of choice
+   -or- sets up the requested Access Point mode
+   Passes control to connection checking callback method
+*/
 void cfgInit() {  // Initiate connection
 
 #ifdef _DEBUG_
@@ -698,8 +773,8 @@ void cfgInit() {  // Initiate connection
   Serial.print(F("PWD : ")); Serial.println(parameters.pwd_ap);
 #endif
 
-  runningAsAP = false;
-  connectedToAP = false;
+  runningAsAP = false;      // true if setting up as an Access Point was successful
+  connectedToAP = false;    // true if connection to the wireless network of choice was successful
 
   if (parameters.is_ap == 0) { // If not explicitly requested to be an Access Point
     // attempt to connect to an exiting AP
@@ -721,17 +796,22 @@ void cfgInit() {  // Initiate connection
     tConfigure.set(CONNECT_INTRVL, TASK_FOREVER, &cfgChkConnect);
     tConfigure.enableDelayed();
 
-    // set 10 second timeout
+    // set a connection attempts timeout
     tTimeout.set(CONNECT_TIMEOUT * TASK_SECOND, TASK_ONCE, &connectTOut);
     tTimeout.enableDelayed();
   }
   else {
+    // Set the AP parameters and setup the AP mode
     ssid = parameters.ssid_ap;
     pwd = parameters.pwd_ap;
     tConfigure.yield(&cfgSetAP);
   }
 }
 
+/**
+   Periodically check if the connection was established
+   Re-request connection to AP on every 5th iteration
+*/
 void cfgChkConnect() {  // Wait for connection to AP
 
 #ifdef _DEBUG_
@@ -740,9 +820,6 @@ void cfgChkConnect() {  // Wait for connection to AP
 #endif
 
   if (WiFi.status() == WL_CONNECTED) {
-    //    tLedBlink.disable();
-    //    tTimeout.disable();
-
     disconnectedEventHandler = WiFi.onStationModeDisconnected(&onDisconnected);
     connectedToAP = true;
 
@@ -750,9 +827,6 @@ void cfgChkConnect() {  // Wait for connection to AP
     Serial.print(F("Connected to AP. Local ip: "));
     Serial.println(WiFi.localIP());
 #endif
-
-    // request NTP update
-    //    hasNtp = false;
 
     // flash led green rapidly
     rgbRed = 0; rgbGreen = LEDON; rgbBlue = 0;
@@ -770,11 +844,7 @@ void cfgChkConnect() {  // Wait for connection to AP
     tTimeout.enableDelayed();
 
     // Initiate NTP updates
-    //    tNtpUpdater.set(SECS_PER_DAY * TASK_SECOND, TASK_ONCE, &ntpUpdate);
-    //    tNtpUpdater.enableDelayed();
     tNtpUpdater.restart();
-
-    //    tConfigure.yield(&cfgChkNTP);
   }
   else {
     delay(100);
@@ -798,6 +868,9 @@ void cfgChkConnect() {  // Wait for connection to AP
   }
 }
 
+/**
+   Initiates call to NTP server to get current time
+*/
 void doNtpUpdateInit() {
 
 #ifdef _DEBUG_
@@ -805,7 +878,7 @@ void doNtpUpdateInit() {
   Serial.println(F(": doNtpUpdateInit."));
 #endif
 
-  if ( connectedToAP ) {
+  if ( connectedToAP ) {  // only if connected to wifi network
     // request NTP update
     udp.begin(LOCAL_NTP_PORT);
     if ( WiFi.hostByName(ntpServerName, timeServerIP) ) { //get a random server from the pool
@@ -820,7 +893,9 @@ void doNtpUpdateInit() {
   }
 }
 
-// send an NTP request to the time server at the given address
+/**
+   Sends an NTP request to the time server at the given address
+*/
 unsigned long sendNTPpacket(IPAddress & address)
 {
 
@@ -850,9 +925,13 @@ unsigned long sendNTPpacket(IPAddress & address)
   udp.write(packetBuffer, NTP_PACKET_SIZE);
   udp.endPacket();
   yield();
-  //  delay(100);
 }
 
+/**
+   Checks if NTP packet has been received.
+   If so, set the time.
+   If not, re-request on every 5th iteration
+*/
 void cfgChkNTP() {
 
 #ifdef _DEBUG_
@@ -889,6 +968,11 @@ void cfgChkNTP() {
 
 
 #ifdef _DEBUG_ || _TEST_
+/**
+   Print time in the YYYY-MM-DD HH-MM-SS format
+
+   @parap: aTime - time to be printed
+*/
 void printTime(DateTime aTime) {
   //    DateTime now = rtc.now();
 
@@ -912,6 +996,9 @@ void printTime(DateTime aTime) {
 }
 #endif
 
+/**
+   Sets the current time on the software RTC and TIME library
+*/
 void doSetTime(unsigned long aTime) {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -930,6 +1017,11 @@ void doSetTime(unsigned long aTime) {
 }
 
 
+/**
+   Checks if NTP packet has been received durint periodic NTP updates
+   If so, set the time.
+   If not, re-request on every 5th iteration
+*/
 bool doNtpUpdateCheck() {
 
 #ifdef _DEBUG_
@@ -973,6 +1065,9 @@ bool doNtpUpdateCheck() {
   return false;
 }
 
+/**
+   TIME library service function to periodically adjust the clock
+*/
 time_t getTime() {
 
 #ifdef _DEBUG_
@@ -983,6 +1078,10 @@ time_t getTime() {
   return rtc.now().unixtime();
 }
 
+
+/**
+   Initiate periodic NTP update.
+*/
 void ntpUpdate() {
 
 #ifdef _DEBUG_
@@ -997,8 +1096,6 @@ void ntpUpdate() {
     if ( doNtpUpdateCheck() ) {
       if ( !hasNtp ) tTicker.restart();
       hasNtp = true;
-      //    rtc.adjust( DateTime(epoch) );
-      //    checkUpdateTime();
       doSetTime(epoch);
       tNtpUpdater.disable();
       udp.stop();
@@ -1007,9 +1104,6 @@ void ntpUpdate() {
 #endif
 
     }
-    else {
-      //    delay(100);
-    }
   }
   else {
     tNtpUpdater.disable();
@@ -1017,10 +1111,10 @@ void ntpUpdate() {
   }
 }
 
-//void ntpUpdateOnDisable() {
-//  sleepTime.signal();
-//}
 
+/**
+   Initiate configuration of the device as Soft Access Point
+*/
 bool globRet;
 void cfgSetAP() {  // Configure server
 
@@ -1061,6 +1155,9 @@ void cfgSetAP() {  // Configure server
   tTimeout.enableDelayed();
 }
 
+/**
+   Checks if AP configuration was successful.
+*/
 void cfgChkAP() {  // Wait for AP mode to happen
 
 #ifdef _DEBUG_
@@ -1073,9 +1170,6 @@ void cfgChkAP() {  // Wait for AP mode to happen
     tTimeout.disable();
     tConfigure.yield(&cfgFinish);
 
-    //    epoch = STATIC_TIME;
-    //    doSetTime();
-
 #ifdef _DEBUG_
     Serial.print(F("Running as AP. Local ip: "));
     Serial.println(WiFi.softAPIP());
@@ -1086,6 +1180,13 @@ void cfgChkAP() {  // Wait for AP mode to happen
   }
 }
 
+
+/**
+   Finish device initial configuration:
+   - launch web server
+   - launch DNS server for AP mode for "plant.io" domain
+   - initiate periodic measurement and watering runs
+*/
 void cfgFinish() {  // WiFi config successful
 
 #ifdef _DEBUG_
@@ -1097,7 +1198,6 @@ void cfgFinish() {  // WiFi config successful
 
   SPIFFS.begin();
   server.on("/", serverHandleRoot);
-  //  server.on("/confnetworksave", HTTP_POST, [](){ server.send(200, "text/plain", ""); }, handleConfnetworksave);
   server.on("/confnetworksave", HTTP_POST, handleConfnetworksave);
   server.on("/confwatersave", HTTP_POST, handleConfwatersave);
   server.on("/reset", HTTP_POST, resetDevice);
@@ -1123,24 +1223,12 @@ void cfgFinish() {  // WiFi config successful
     server.send(200, "text/plain", "");
   }, handleFileUpload);
 
-  //  //called when the url is not defined here
-  //  //use it to load content from SPIFFS
-  //  server.onNotFound([](){
-  //    if(!handleFileRead(server.uri()))
-  //      server.send(404, "text/plain", "FileNotFound");
-  //  });
-
   // ==================================================
 #endif
 
-
   server.begin();
-  //  server.setNoDelay(true);  // underlying wifiserver is not exposed
-
-  //  MDNS.addService("http", "tcp", LOCAL_HTTP_PORT);
 
   if ( connectedToAP ) tHandleClients.restart();
-
   tTicker.restart();
 
 #ifdef _DEBUG_
@@ -1148,14 +1236,16 @@ void cfgFinish() {  // WiFi config successful
 #endif
 }
 
-// THIS IS THE HEARTBEAT TASK:
-// ===========================
-// Current sequence of events:
-// 1. Report to IoT current measurments
-// 2. Run measurments and water if necessary
-// 3. Report to IoT after watering is done or not required
-// 4. Update NTP time if connected
-// 5. Deep sleep after a timeout if requested
+
+/**
+  THIS IS THE HEARTBEAT TASK:
+  ===========================
+  Current sequence of events:
+  1. Run measurments and water if necessary
+  2. Report to IoT after watering is done or not required
+  3. Update NTP time if connected
+  4. Deep sleep after a timeout if requested
+*/
 
 void ticker() {
 #ifdef _DEBUG_ || _TEST_
@@ -1168,42 +1258,53 @@ void ticker() {
 
   tickTime = now();
 
-  if ( !isNight () ) {
+  tMeasureRestart.restart();
+  wateringDone.setWaiting();
+  tIotReport.waitFor( &wateringDone );
 
-    tMeasureRestart.restart();
-    wateringDone.setWaiting();
-    tIotReport.waitFor( &wateringDone );
-    tNtpUpdater.waitFor( tIotReport.getInternalStatusRequest(), NTPUPDT_INTRVL, NTP_TIMEOUT);
-  }
   if ( parameters.powersave ) {
     tSleep.waitForDelayed( tNtpUpdater.getInternalStatusRequest(), SLEEP_TOUT, TASK_ONCE );
   }
 }
 
+/**
+  Blinks LED with the predefined color and predefined ON and OFF delays
+*/
 bool flip = false;
 void cfgLed() {
   if (flip) {
     led();
-    tLedBlink.setInterval( ledOnDuration ); 
+    tLedBlink.setInterval( ledOnDuration );
   }
   else {
     ledOnDisable();
-    tLedBlink.setInterval( ledOffDuration ); 
+    tLedBlink.setInterval( ledOffDuration );
   }
   flip = !flip;
 }
 
+/**
+  Ensures that blinking start with LED ON state
+  */
 bool ledOnEnable() {
   flip = true;
   return true;
 }
 
+/**
+  Ensures LED is OFF after blinking is disabled
+  */
 void ledOnDisable() {
   digitalWrite(RGBLED_RED_PIN, LEDOFF);
   digitalWrite(RGBLED_GREEN_PIN, LEDOFF);
   digitalWrite(RGBLED_BLUE_PIN, LEDOFF);
 }
 
+/**
+  Connect to AP timeout.
+  Tries to set up the device as Access Point
+  NOTE: ALWAYS USES THE DEFAULT AP SSID/PASSWORD
+  */
 void connectTOut() {
 
 #ifdef _DEBUG_
@@ -1227,6 +1328,10 @@ void connectTOut() {
   tConfigure.yield(&cfgSetAP);  // configure as server
 }
 
+/**
+  NTP update timeout.
+  Suppose to turn LED AMBER
+  */
 void ntpTOut() {
 
 #ifdef _DEBUG_
@@ -1235,11 +1340,13 @@ void ntpTOut() {
 #endif
 
   tLedBlink.disable();
-  rgbRed = LEDON; rgbGreen = 242 * (LEDON / 255); rgbBlue = 0;  // configure as yellow
-  //  rgbRed = LEDON/4; rgbGreen = (200 * (LEDON / 255))/4; rgbBlue = 0;  // configure as yellow
+  rgbRed = LEDON; rgbGreen = 212 * (LEDON / 255); rgbBlue = 0;  // configure as yellow
   tConfigure.yield(&cfgFinish);  // configure as server
 }
 
+/**
+  Soft AP timeout - at this point device has no connectivity and will reset itsef in 10 minutes
+  */
 void serverTOut() {
 
 #ifdef _DEBUG_
@@ -1248,18 +1355,14 @@ void serverTOut() {
 #endif
 
   led(LEDON, LEDOFF, LEDOFF);
-  //  ts.disableAll();
-  //
-  //  while (1) {
-  //    led(LEDON, 0, 0);
-  //    delay(2000);
-  //    led(0, 0, 0);
-  //    delay(500);
-  //  }
   delay(10UL * TASK_MINUTE);
   if ( !runningAsAP ) resetDevice();
 }
 
+
+/**
+  This event is called when a station disconnects from wireless network 
+  */
 void onDisconnected(const WiFiEventStationModeDisconnected & event) {
 
 #ifdef _DEBUG_
@@ -1274,7 +1377,9 @@ void onDisconnected(const WiFiEventStationModeDisconnected & event) {
   }
 }
 
-
+/**
+  This event is called when a station connects to Soft AP 
+  */
 void onClientConnected(const WiFiEventSoftAPModeStationConnected & event) {
 
 #ifdef _DEBUG_
@@ -1286,6 +1391,10 @@ void onClientConnected(const WiFiEventSoftAPModeStationConnected & event) {
   if ( numClients ) tHandleClients.restart();
 }
 
+
+/**
+  This event is called when a station disconnects from Soft AP 
+  */
 void onClientDisconnected(const WiFiEventSoftAPModeStationDisconnected & event) {
 
 #ifdef _DEBUG_
@@ -1298,7 +1407,9 @@ void onClientDisconnected(const WiFiEventSoftAPModeStationDisconnected & event) 
   }
 }
 
-
+/**
+  Attempts to reconnect to wireless network after connection is lost 
+  */
 void connectedChk() {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1311,7 +1422,7 @@ void connectedChk() {
     yield();
     WiFi.begin(parameters.ssid, parameters.pwd);
     yield();
-    //    delay(100);
+
     // set timeout
     tTimeout.set(CONNECT_TIMEOUT * TASK_SECOND, TASK_ONCE, &connectedChkTOut);
     tTimeout.enableDelayed();
@@ -1326,6 +1437,9 @@ void connectedChk() {
 }
 
 
+/**
+  Reconnection attempts timeout - device is reset after 10 mimutes 
+  */
 void connectedChkTOut () {
 
 #ifdef _DEBUG_
@@ -1338,6 +1452,11 @@ void connectedChkTOut () {
 }
 
 
+/**
+  Deep Sleep callback
+  Current watering results and projected ntp time at wake up are stored
+  Device is put into deep sleep mode after that 
+  */
 void sleepCallback() {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1380,6 +1499,9 @@ void sleepCallback() {
   }
 }
 
+/**
+  Saves provided time to RTC memory 
+  */
 void saveTimeToRTC (unsigned long aUt) {
   time_restore.magic = MAGIC_NUMBER;
   time_restore.ccode = ~time_restore.magic;
@@ -1389,12 +1511,11 @@ void saveTimeToRTC (unsigned long aUt) {
   ESP.rtcUserMemoryWrite( 64, (uint32_t*) p, sizeof(TTimeStored) );
   p = (byte*) &water_log;
   ESP.rtcUserMemoryWrite( 128, (uint32_t*) p, sizeof(TWaterLog) );
-  //  ESP.rtcUserMemoryWrite( 0, (uint32_t*) p, sizeof(TTimeStored)/sizeof( uint32_t) );
-  //  p = (byte*) &water_log;
-  //  ESP.rtcUserMemoryWrite( 256, (uint32_t*) p, sizeof(TWaterLog)/sizeof(uint32_t) );
 }
 
-
+/**
+  Resets the device 
+  */
 void resetDevice() {
 
 #ifdef _DEBUG_
@@ -1421,13 +1542,14 @@ void resetDevice() {
   delay(100);
 }
 
-//bool WLReported = false;
-bool measureWLOnEnable() {
-  //  WLReported = false;
-  wl.initialize();
-  return true;
-}
 
+// Water section
+// =============
+
+/**
+  Initiate water level measurement with a timeout of 4 milliseconds (or ~ XX cm)
+  Allows collection of minimal necessary samples to properly average the waterlevel  
+  */
 void measureWL() {
 
 #ifdef _DEBUG_
@@ -1443,7 +1565,9 @@ void measureWL() {
 
 
 
-
+/**
+  Measured current humidity based on the ADC reading and updates the average filtered value 
+  */
 // Measurment and Watering
 #define HUM_SAMPLES  5
 long  humData[HUM_SAMPLES];
@@ -1475,18 +1599,20 @@ long measureHumidity()
   return hum.value(r);
 }
 
-//bool MSReported = false;
-//bool measureMSOnEnable() {
-//  hum.initialize();
-//  return true;
-//}
-
+/**
+  When Soil humidity measurement finishes, turns off power on the humidity probe, signals that probe is idle and disables water level measurement
+  */
 void measureMSOnDisable() {
   probePowerOff();
   probeIdle.signal();
   tMesrLevel.disable();
 }
 
+
+/**
+  Primes the humidity probe for 1 second
+  then signals that humidity measurement value is ready  
+  */
 void measureMS() {
 
   // One second to "warm up" the probe
@@ -1495,7 +1621,7 @@ void measureMS() {
     probeIdle.setWaiting();
     tMeasureRestart.waitFor(&probeIdle);
 
-    hum.initialize();
+    //    hum.initialize();
     tMesrMoisture.setInterval(TASK_SECOND / 5);
     tMesrMoisture.delay(TASK_SECOND);
     return;
@@ -1513,6 +1639,9 @@ void measureMS() {
 }
 
 
+/**
+  Main measure callback which decides whether watering should occur or stop 
+  */
 void measureCallback() {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1552,14 +1681,28 @@ void measureCallback() {
   }
 }
 
+/**
+  Measurement restart method
+  Restarts measurements when previous measurements are ready
+  Since pump run draws current, it may affect accuracy of the soil humidity measurement,
+  therefore no measurements takes place during the actual watering run when pump is active 
+  */
 void measureRestart() {
-  measurementsReady.setWaiting(2);
-  tMeasure.waitFor(&measurementsReady);
+  if ( tWater.isEnabled() && ( tWater.getRunCounter() & 1 ) ) {  // Do not measure durint watering run - brown-outs affect accuracy
+    tMeasureRestart.restartDelayed( TASK_SECOND );
+  }
+  else {
+    measurementsReady.setWaiting(2);
+    tMeasure.waitFor(&measurementsReady);
 
-  tMesrLevel.restart();
-  tMesrMoisture.restart();
+    tMesrLevel.restart();
+    tMesrMoisture.restart();
+  }
 }
 
+/**
+  Main watering method - decides how long the watering and saturation runs should take
+  */
 void waterCallback() {
 
 #ifdef _DEBUG_
@@ -1591,15 +1734,10 @@ void waterCallback() {
     tLedBlink.enable();
   }
 }
-//
-//void ledSaturate() {
-//  rgbBlue += delta;
-//  led();
-//  if ( rgbBlue >= LEDON || rgbBlue <= 0 ) delta = -delta;
-//}
 
-
-
+/**
+  Start of watering. Makes sure device is allowed to water and initiates the log entry 
+  */
 bool waterOnEnable() {
 
   if ( !canWater() ) {
@@ -1620,6 +1758,9 @@ bool waterOnEnable() {
   return true;
 }
 
+/**
+  Stop of watering. Turns the pump off. Makes sure log entry is completed
+  */
 void waterOnDisable() {
   motorOff();
 
@@ -1631,7 +1772,6 @@ void waterOnDisable() {
   tMeasureRestart.disable();
   tLedBlink.disable();
   wateringDone.signal();
-  //  reportToIoT.signal();
 }
 
 
@@ -1716,13 +1856,14 @@ void parseFile( char* aFileName, int(*aParser)(int aTag, char* aBuffer, int aSiz
         //          0123456789012345
         if ( strncmp(CReplaceTag, buf, CRLen) == 0 ) {
 
-          //#ifdef _DEBUG_
+#ifdef _DEBUG_
           //          Serial.println(F("Found the '<!-- ###' tag."));
           //          Serial.print(F("Current html line: "));
           //          Serial.print(len);
           //          Serial.print(" : ");
           //          Serial.println(buf);
-          //#endif
+#endif
+
           buf[CRLen + 4] = 0;
           int tag = String(&buf[CRLen]).toInt();
 
@@ -2177,18 +2318,16 @@ void setup() {
 #endif
 
   configurePins();
-
-
-//  TESTLEDS();
-
   rtc.begin();
   rtc.adjust( DateTime(STATIC_TIME) );
   setSyncProvider(&getTime);   // the function to get the time from the RTC
 
+  wl.initialize();
+  hum.initialize();
+
   hasNtp = false;
   if ( ESP.getResetReason() != CWakeReasonReset ) {
     byte *p = (byte *) &time_restore;
-    //    if ( ESP.rtcUserMemoryRead( 0, (uint32_t*) p, sizeof(TTimeStored)/sizeof(uint32_t) )) {
     if ( ESP.rtcUserMemoryRead( 64, (uint32_t*) p, sizeof(TTimeStored) )) {
 
 
@@ -2200,12 +2339,10 @@ void setup() {
 #endif
 
       if ( time_restore.magic == MAGIC_NUMBER && time_restore.ccode == ~(MAGIC_NUMBER) ) {
-        //        rtc.adjust( DateTime( time_restore.ttime + WAKE_DELAY ) );
         doSetTime(time_restore.ttime + WAKE_DELAY);
         hasNtp = time_restore.hasntp;
 
         p = (byte *) &water_log;
-        //        ESP.rtcUserMemoryRead( 256, (uint32_t*) p, sizeof(TWaterLog)/sizeof(uint32_t) );
         ESP.rtcUserMemoryRead( 128, (uint32_t*) p, sizeof(TWaterLog) );
 
 #ifdef _DEBUG_ || _TEST_
@@ -2412,19 +2549,8 @@ bool httpRequest(const String & method,
     }
   }
 
-  //Serial.println("Reading response body");
-
   uint8_t buf[512];
   response = "";
-  //  response.reserve(contentLength + 1);
-
-  //  while (response.length() < contentLength && blynk_client.connected()) {
-  //    while (blynk_client.available()) {
-  //      char c = blynk_client.read();
-  //      response += c;
-  //    }
-  //  }
-  //  blynk_client.stop();
   if ( blynk_client.connected() ) {
     blynk_client.read(buf, contentLength);
     buf[contentLength] = 0;
