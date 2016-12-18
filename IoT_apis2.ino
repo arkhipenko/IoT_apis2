@@ -3,7 +3,7 @@
   Based on ESP8622 NODEMCU v2 dev kit chip
    Code Version 0.1.0
    Parameters Version 01
-  MM
+
   Change Log:
   2016-11-29
     v0.1.0 - work started
@@ -12,8 +12,11 @@
 
 // TEST/DEBUG defines
 // ------------------
-#define _DEBUG_
-#define _TEST_
+//#define _DEBUG_
+//#define _TEST_
+
+// IoT framework selection
+// -----------------------
 #define _IOT_BLYNK_
 
 // TaskScheduler options:
@@ -37,13 +40,13 @@
 #include <WiFiUdp.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
-//#include <ESP8266mDNS.h>
 #include <DNSServer.h>
 #include <FS.h>
 
 // Natural constants
 #define US_TO_MM_FACTOR  (100000/583)
 #define STATIC_TIME      1451606400UL
+#define SD3              10
 
 // Watering parameter defaults
 // ---------------------------
@@ -90,45 +93,49 @@
 #define WLLOW     30  // mm, low level of water bucket
 
 // Wifi
-#define CONNECT_TIMEOUT 20  //seconds
+#define CONNECT_TIMEOUT 30  //seconds
 #define NTP_TIMEOUT     20  //seconds
 #define CONNECT_BLINK   260 // ms
 #define WL_PERIOD       200 // ms
 
-#define CONNECT_INTRVL  1000
-#define NTPUPDT_INTRVL  1000
+#define CONNECT_INTRVL  2000 // check every 2 seconds
+#define NTPUPDT_INTRVL  2000 // check every 2 seconds
 
 // PINs
 // ----
 // Moisture probe analog pin
 #define MOISTURE_PIN      A0  // A0
-#define MOISTURE_PWR_PIN  13  // D7
-#define MOISTURE_GND_PIN  15  // D8
+#define MOISTURE_PWR_PIN  D7  // D8  //13  // D7
 #define SENSOR_OUT_VALUE  1000
 
-#define LEAK_PIN          02 // D4
+#define LEAK_PIN          D5
 
 // RGB LED
-#define RGBLED_RED_PIN    10  // SD3 nodemcu pin
-#define RGBLED_GREEN_PIN  05  // D1 nodemcu pin
-#define RGBLED_BLUE_PIN   04  // D2 nodemcu pin
+#define RGBLED_RED_PIN    SD3  // SD3 nodemcu pin
+#define RGBLED_GREEN_PIN  D1   // D1 nodemcu pin
+#define RGBLED_BLUE_PIN   D6   // D6 nodemcu pin
 
-#define LEDON             PWMRANGE // full range 
+//#define LEDON             PWMRANGE // full range
+#define   LEDON           1
+#define   LEDOFF          0
+#define   LEDSTAY         (-1)
 
 // HC-SR04 ultrasound sensor
-#define SR04_TRIGGER_PIN  14  // D5 nomemcu pin
-#define SR04_ECHO_PIN     12  // D6 nomemcu pin
+#define SR04_TRIGGER_PIN  D4  // D5 nodemcu pin
+#define SR04_ECHO_PIN     D3  //  nodemcu pin
 
 // PUMP pins
-#define PUMP_PWR_PIN      00  // D3
+#define PUMP_PWR_PIN      D2  // D2
 
 
 // EEPROM token for parameters
 const char *CToken = "APIS00\0"; // Eeprom token: Automatic Plant Irrigation System
-const char *CSsid  = "Verizon-MiFi6620L-3D38-AMA\0";
-const char *CPwd   = "21613718\0";
-//const char *CSsid  = "beta_n\0";
-//const char *CPwd   = "460w20thstret1973b\0";
+//const char *CSsid  = "Verizon-MiFi6620L-3D38-AMA\0";
+//const char *CPwd   = "21613718\0";
+const char *CSsid  = "beta_n\0";
+const char *CPwd   = "460w20thstret1973b\0";
+//const char *CSsid  = "donotconnect";
+//const char *CPwd   = "8182838485";
 const char *CDSsid  = "Plant_";
 const char *CDPwd   = "changeme!";
 const char *CHost  = "plant.io";
@@ -161,12 +168,14 @@ const char* CWakeReasonReset = "External System";
 void cfgInit();
 void cfgLed();
 void ledOnDisable();
+bool ledOnEnable();
 void ntpUpdate();
-void ntpUpdateOnDisable();
+
 void connectedChk();
 void waterCallback();
 bool waterOnenable();
 void waterOndisable();
+void measureCallback();
 void measureWL();
 bool measureWLOnEnable();
 void measureMS();
@@ -186,17 +195,14 @@ void serverHandleRoot();
 void serverHandleNotFound();
 
 void sleepCallback();
-void sleepTimeout();
+//void sleepTimeout();
 
 void resetDevice();
+void  iot_report();
 
 // Task Scheduling
 // ---------------
-StatusRequest pulseComplete, measurementsReady, probeIdle, pageLoaded, sleepTime;
-
-#ifdef _IOT_BLYNK_
-StatusRequest reportToIoT;
-#endif
+StatusRequest measurementsReady, probeIdle, pageLoaded, wateringDone;
 
 Scheduler ts, hpts;
 
@@ -207,20 +213,20 @@ Task tTest          (TASK_SECOND * 10, TASK_FOREVER, &testTicker, &ts, true);
 
 
 Task tConfigure     (TASK_IMMEDIATE, TASK_ONCE, &cfgInit, &ts, true);
-Task tLedBlink      (TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ts, false, NULL, &ledOnDisable);
+Task tLedBlink      (TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ts, false, &ledOnEnable, &ledOnDisable);
 Task tTimeout       (TASK_IMMEDIATE, TASK_FOREVER, NULL, &ts);
-Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts, false, NULL, &ntpUpdateOnDisable);
+Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts, false); //, NULL, &ntpUpdateOnDisable);
 Task tConnected     (TASK_SECOND, TASK_FOREVER, &connectedChk, &ts, false);
 
 Task tHandleClients (TASK_SECOND, TASK_FOREVER, &handleClientCallback, &ts, false);
 
 Task tTicker        (TICKER, TASK_FOREVER, &ticker, &ts, false);
 
-Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false, &measureWLOnEnable, NULL);
-Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, NULL, &measureMSOnDisable);
-
 Task tMeasure       (&measureCallback, &ts); //, NULL, &measureOnDisable);
 Task tMeasureRestart(&measureRestart, &ts);
+
+Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false, &measureWLOnEnable, NULL);
+Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, NULL, &measureMSOnDisable);
 
 Task tWater         (TASK_IMMEDIATE, TASK_ONCE, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
 
@@ -228,14 +234,15 @@ Task tPing          (TASK_IMMEDIATE, TASK_ONCE, &pingTOut, &hpts, false);
 Task tWaterLevel    (&waterLevelCalc, &hpts);
 
 Task tSleep         (&sleepCallback, &ts);
-Task tSleepTimeout  (SLEEP_TOUT, TASK_ONCE, &sleepTimeout, &ts, false);
+//Task tSleepTimeout  (SLEEP_TOUT, TASK_ONCE, NULL, &ts, false);
+
+Task tIotReport     (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
+//Task tIotReport2    (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
 
 Task tReset         (&resetDevice, &ts);
 
-#ifdef _IOT_BLYNK_
-void  iot_report();
-Task tIotReport     (&iot_report, &ts);
-#endif
+
+
 
 // Parameters
 // ----------
@@ -333,14 +340,16 @@ time_t        bootTime;           // Timestamp of the device start up
 time_t        tickTime;           // Timestamp of the current tick
 unsigned long epoch;              // Time reported by NTP
 bool          nightMode = false;  // Determine whether it is night once during tick, and then use the variable instead.
+unsigned long ledOnDuration, ledOffDuration;
 
 // Execution
 bool connectedToAP = false; // if connected to AP, presumably you can query and set the time
+bool runningAsAP = false;
 // and properly destinguish between night and day.
 // Otherwise, the monitoring needs to run once a day
 // from the time the device was started assuming that happens
 // during the day
-bool hasNtp;
+bool hasNtp;  // Indicates that device was able to update time from NTP server at some point
 
 // WiFi specific
 WiFiEventHandler disconnectedEventHandler;
@@ -359,6 +368,14 @@ volatile bool clockStarted = false;
 // ------------------------------------------------------------------
 
 #ifdef _TEST_
+void TESTLEDS() {
+  digitalWrite(RGBLED_RED_PIN, HIGH); delay(1000); digitalWrite(RGBLED_RED_PIN, LOW); delay(1000);
+  digitalWrite(RGBLED_GREEN_PIN, HIGH); delay(1000); digitalWrite(RGBLED_GREEN_PIN, LOW); delay(1000);
+  digitalWrite(RGBLED_BLUE_PIN, HIGH); delay(1000); digitalWrite(RGBLED_BLUE_PIN, LOW); delay(1000);
+  digitalWrite(RGBLED_RED_PIN, HIGH); digitalWrite(RGBLED_GREEN_PIN, HIGH); digitalWrite(RGBLED_BLUE_PIN, HIGH); delay(1000);
+  ledOff();
+}
+
 void testTicker() {
   long i = tTest.getRunCounter();
 
@@ -395,13 +412,10 @@ void testTicker() {
 // Utility methods
 // ---------------
 
-//#define SR04_TRIGGER_PIN  14  // D5 nomemcu pin
-//#define SR04_ECHO_PIN     12  // D6 nomemcu pin
-
 void ping(unsigned long aTimeout) {  // in millis
 
 #ifdef _TEST_
-  pulseComplete.signal();
+  tPing.disable();
   return;
 #endif
 
@@ -426,7 +440,7 @@ void pingStartStopClock() {
     detachInterrupt(SR04_ECHO_PIN);
     pulseBusy = false;
     tPing.disable();
-    pulseComplete.signal();
+    //    pulseComplete.signal();
   }
   else {
     pulseStart = micros();
@@ -504,31 +518,30 @@ void motorOff() {
 //#define MOISTURE_PWR_PIN  13  // D7
 //#define MOISTURE_GND_PIN  15  // D8
 void probePowerOn() {
-  digitalWrite(MOISTURE_GND_PIN, LOW);
   digitalWrite(MOISTURE_PWR_PIN, HIGH);
-}
-
-void probePowerReverse() {
-  digitalWrite(MOISTURE_PWR_PIN, LOW);
-  digitalWrite(MOISTURE_GND_PIN, HIGH);
 }
 
 void probePowerOff() {
   digitalWrite(MOISTURE_PWR_PIN, LOW);
-  digitalWrite(MOISTURE_GND_PIN, LOW);
 }
 
 bool hasLeaked() {
-  bool r;
+
   pinMode(LEAK_PIN, INPUT_PULLUP);
   delay(5);
 
-  r = digitalRead(LEAK_PIN);
+  bool hasleaked = ( digitalRead(LEAK_PIN) == LOW );
+
+#ifdef _DEBUG_
+  Serial.print(millis());
+  Serial.print(F(": hasLeaked = ")); Serial.println(hasleaked ? "YES" : "NO");
+  Serial.print(F("LEAK_PIN = ")); Serial.println(digitalRead(LEAK_PIN));
+#endif
 
   pinMode(LEAK_PIN, OUTPUT);
   digitalWrite(LEAK_PIN, LOW);
 
-  return (r == LOW);
+  return hasleaked;
 }
 
 bool canWater() {
@@ -568,31 +581,30 @@ bool isNight() {
 }
 
 // 3 Color LED
-int rgbRed = 0, rgbGreen = 0, rgbBlue = 0;
-bool pwmRed = false, pwmGreen = false, pwmBlue = false;
-void led(int aR = -1, int aG = -1, int aB = -1) {
+int rgbRed = LEDOFF, rgbGreen = LEDOFF, rgbBlue = LEDOFF;
+void led(int aR = LEDSTAY, int aG = LEDSTAY, int aB = LEDSTAY) {
   if (aR >= 0) rgbRed = aR;
   if (aG >= 0) rgbGreen = aG;
   if (aB >= 0) rgbBlue = aB;
 
-  if (rgbRed < 0) rgbRed = 0; if (rgbRed > LEDON) rgbRed = LEDON;
-  if (rgbGreen < 0) rgbGreen = 0; if (rgbGreen > LEDON) rgbGreen = LEDON;
-  if (rgbBlue < 0) rgbBlue = 0; if (rgbBlue > LEDON) rgbBlue = LEDON;
+  if (rgbRed < 0) rgbRed = LEDOFF; if (rgbRed > LEDON) rgbRed = LEDON;
+  if (rgbGreen < 0) rgbGreen = LEDOFF; if (rgbGreen > LEDON) rgbGreen = LEDON;
+  if (rgbBlue < 0) rgbBlue = LEDOFF; if (rgbBlue > LEDON) rgbBlue = LEDON;
 
   if ( nightMode ) {
-    analogWrite(RGBLED_RED_PIN, 0);
-    analogWrite(RGBLED_GREEN_PIN, 0);
-    analogWrite(RGBLED_BLUE_PIN, 0);
+    digitalWrite(RGBLED_RED_PIN, LEDOFF);
+    digitalWrite(RGBLED_GREEN_PIN, LEDOFF);
+    digitalWrite(RGBLED_BLUE_PIN, LEDOFF);
   }
   else {
-    analogWrite(RGBLED_RED_PIN, rgbRed);
-    analogWrite(RGBLED_GREEN_PIN, rgbGreen);
-    analogWrite(RGBLED_BLUE_PIN, rgbBlue);
+    digitalWrite(RGBLED_RED_PIN, rgbRed <= LEDOFF ? LOW : HIGH );
+    digitalWrite(RGBLED_GREEN_PIN, rgbGreen <= LEDOFF ? LOW : HIGH );
+    digitalWrite(RGBLED_BLUE_PIN, rgbBlue <= LEDOFF ? LOW : HIGH );
   }
 }
 
 void ledOff() {
-  led(0, 0, 0);
+  led(LEDOFF, LEDOFF, LEDOFF);
 }
 
 
@@ -686,16 +698,23 @@ void cfgInit() {  // Initiate connection
   Serial.print(F("PWD : ")); Serial.println(parameters.pwd_ap);
 #endif
 
+  runningAsAP = false;
+  connectedToAP = false;
+
   if (parameters.is_ap == 0) { // If not explicitly requested to be an Access Point
     // attempt to connect to an exiting AP
     WiFi.mode(WIFI_STA);
-    WiFi.persistent (false);
+    //    WiFi.persistent (false);
     WiFi.hostname(CHost);
+    yield();
     WiFi.begin(ssid.c_str(), pwd.c_str());
+    yield();
 
     // flash led green
     rgbRed = 0; rgbGreen = LEDON; rgbBlue = 0;
-    tLedBlink.set(CONNECT_BLINK, TASK_FOREVER, &cfgLed, NULL, &ledOnDisable);
+    ledOnDuration = CONNECT_BLINK;
+    ledOffDuration = CONNECT_BLINK;
+    tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
     tLedBlink.enable();
 
     // check connection periodically
@@ -737,7 +756,9 @@ void cfgChkConnect() {  // Wait for connection to AP
 
     // flash led green rapidly
     rgbRed = 0; rgbGreen = LEDON; rgbBlue = 0;
-    tLedBlink.set(CONNECT_BLINK / 4, TASK_FOREVER, &cfgLed, NULL, &ledOnDisable);
+    ledOnDuration = CONNECT_BLINK / 4;
+    ledOffDuration = ledOnDuration;
+    tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
     tLedBlink.enable();
 
     // check connection periodically
@@ -756,6 +777,7 @@ void cfgChkConnect() {  // Wait for connection to AP
     //    tConfigure.yield(&cfgChkNTP);
   }
   else {
+    delay(100);
     if (tConfigure.getRunCounter() % 5 == 0) {
 
 #ifdef _DEBUG_
@@ -769,7 +791,9 @@ void cfgChkConnect() {  // Wait for connection to AP
       yield();
       WiFi.hostname(CHost);
       WiFi.mode(WIFI_STA);
+      yield();
       WiFi.begin(ssid.c_str(), pwd.c_str());
+      yield();
     }
   }
 }
@@ -781,21 +805,23 @@ void doNtpUpdateInit() {
   Serial.println(F(": doNtpUpdateInit."));
 #endif
 
-  // request NTP update
-  udp.begin(LOCAL_NTP_PORT);
-  if ( WiFi.hostByName(ntpServerName, timeServerIP) ) { //get a random server from the pool
+  if ( connectedToAP ) {
+    // request NTP update
+    udp.begin(LOCAL_NTP_PORT);
+    if ( WiFi.hostByName(ntpServerName, timeServerIP) ) { //get a random server from the pool
 
 #ifdef _DEBUG_
-    Serial.print(F("timeServerIP = "));
-    Serial.println(timeServerIP);
+      Serial.print(F("timeServerIP = "));
+      Serial.println(timeServerIP);
 #endif
 
-    sendNTPpacket(timeServerIP); // send an NTP packet to a time server
+      sendNTPpacket(timeServerIP); // send an NTP packet to a time server
+    }
   }
 }
 
 // send an NTP request to the time server at the given address
-unsigned long sendNTPpacket(IPAddress& address)
+unsigned long sendNTPpacket(IPAddress & address)
 {
 
 #ifdef _DEBUG_
@@ -833,29 +859,30 @@ void cfgChkNTP() {
   Serial.print(millis());
   Serial.println(F(": cfgChkNTP."));
 #endif
-
-  if ( tConfigure.isFirstIteration() || tConfigure.getRunCounter() % 5 == 0 ) {
-    udp.stop();
-    doNtpUpdateInit();
-  }
-  else {
-    if ( doNtpUpdateCheck()) {
-      doSetTime(epoch);
-
-#ifdef _DEBUG_
-      Serial.println(F("NTP Update successful"));
-#endif
-
-      bootTime = now();
-      hasNtp = true;
-
-      tLedBlink.disable();
-      tTimeout.disable();
-      tConfigure.yield(&cfgFinish);
+  if (connectedToAP ) {
+    if ( tConfigure.isFirstIteration() || tConfigure.getRunCounter() % 5 == 0 ) {
       udp.stop();
+      doNtpUpdateInit();
     }
     else {
-      //      delay (100);
+      if ( doNtpUpdateCheck()) {
+        doSetTime(epoch);
+
+#ifdef _DEBUG_
+        Serial.println(F("NTP Update successful"));
+#endif
+
+        bootTime = now();
+        hasNtp = true;
+
+        tLedBlink.disable();
+        tTimeout.disable();
+        tConfigure.yield(&cfgFinish);
+        udp.stop();
+      }
+      else {
+        //      delay (100);
+      }
     }
   }
 }
@@ -962,32 +989,37 @@ void ntpUpdate() {
   Serial.print(millis());
   Serial.println(F(": ntpUpdate."));
 #endif
-
-  if ( tNtpUpdater.isFirstIteration() || tNtpUpdater.getRunCounter() % 5 == 0) {
-    udp.stop();
-    doNtpUpdateInit();
-  }
-  if ( doNtpUpdateCheck() ) {
-    if ( !hasNtp ) tTicker.restart();
-    hasNtp = true;
-    //    rtc.adjust( DateTime(epoch) );
-    //    checkUpdateTime();
-    doSetTime(epoch);
-    tNtpUpdater.disable();
-    udp.stop();
+  if ( connectedToAP ) {
+    if ( tNtpUpdater.isFirstIteration() || tNtpUpdater.getRunCounter() % 5 == 0) {
+      udp.stop();
+      doNtpUpdateInit();
+    }
+    if ( doNtpUpdateCheck() ) {
+      if ( !hasNtp ) tTicker.restart();
+      hasNtp = true;
+      //    rtc.adjust( DateTime(epoch) );
+      //    checkUpdateTime();
+      doSetTime(epoch);
+      tNtpUpdater.disable();
+      udp.stop();
 #ifdef _DEBUG_
-    Serial.println(F("NTP update successful"));
+      Serial.println(F("NTP update successful"));
 #endif
 
+    }
+    else {
+      //    delay(100);
+    }
   }
   else {
-    //    delay(100);
+    tNtpUpdater.disable();
+    udp.stop();
   }
 }
 
-void ntpUpdateOnDisable() {
-  sleepTime.signal();
-}
+//void ntpUpdateOnDisable() {
+//  sleepTime.signal();
+//}
 
 bool globRet;
 void cfgSetAP() {  // Configure server
@@ -1014,8 +1046,10 @@ void cfgSetAP() {  // Configure server
   dnsServer.start(LOCAL_DNS_PORT, CHost, apIP);
 
   // flash led blue
-  rgbRed = LEDON; rgbGreen = 0; rgbBlue = LEDON;
-  tLedBlink.set(CONNECT_BLINK, TASK_FOREVER, &cfgLed, NULL, &ledOnDisable);
+  rgbRed = 0; rgbGreen = LEDON; rgbBlue = LEDON;
+  ledOnDuration = CONNECT_BLINK;
+  ledOffDuration = ledOnDuration;
+  tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
   tLedBlink.enable();
 
   // check connection periodically
@@ -1046,6 +1080,7 @@ void cfgChkAP() {  // Wait for AP mode to happen
     Serial.print(F("Running as AP. Local ip: "));
     Serial.println(WiFi.softAPIP());
 #endif
+    runningAsAP = true;
     clientConnectedEventHandler = WiFi.onSoftAPModeStationConnected(&onClientConnected);
     clientDisconnectedEventHandler = WiFi.onSoftAPModeStationDisconnected(&onClientDisconnected);
   }
@@ -1058,9 +1093,7 @@ void cfgFinish() {  // WiFi config successful
   Serial.println(F(": cfgFinish."));
 #endif
 
-  led(rgbRed / 4, rgbGreen / 4, rgbBlue / 4);
-  //  MDNS.begin(CHost);
-  tTicker.restart();
+  led(LEDON, LEDON, LEDON);
 
   SPIFFS.begin();
   server.on("/", serverHandleRoot);
@@ -1108,10 +1141,21 @@ void cfgFinish() {  // WiFi config successful
 
   if ( connectedToAP ) tHandleClients.restart();
 
+  tTicker.restart();
+
 #ifdef _DEBUG_
   Serial.println("HTTP server started");
 #endif
 }
+
+// THIS IS THE HEARTBEAT TASK:
+// ===========================
+// Current sequence of events:
+// 1. Report to IoT current measurments
+// 2. Run measurments and water if necessary
+// 3. Report to IoT after watering is done or not required
+// 4. Update NTP time if connected
+// 5. Deep sleep after a timeout if requested
 
 void ticker() {
 #ifdef _DEBUG_ || _TEST_
@@ -1124,74 +1168,40 @@ void ticker() {
 
   tickTime = now();
 
+  if ( !isNight () ) {
+
+    tMeasureRestart.restart();
+    wateringDone.setWaiting();
+    tIotReport.waitFor( &wateringDone );
+    tNtpUpdater.waitFor( tIotReport.getInternalStatusRequest(), NTPUPDT_INTRVL, NTP_TIMEOUT);
+  }
   if ( parameters.powersave ) {
-    tSleepTimeout.restartDelayed();
-    sleepTime.setWaiting(3);
-    tSleep.waitFor(&sleepTime);
+    tSleep.waitForDelayed( tNtpUpdater.getInternalStatusRequest(), SLEEP_TOUT, TASK_ONCE );
   }
-
-  if ( isNight() ) {
-
-#ifdef _DEBUG_ || _TEST_
-    Serial.println(F("Night mode: LED off; SleepTime-SIGNAL"));
-#endif
-
-    ledOnDisable();
-    sleepTime.signal();
-    //    return;
-  }
-
-
-  if ( !tWater.isEnabled() ) {
-    // Launch measurment and watering
-    led();
-    measureRestart();
-  }
-
-
-  if ( connectedToAP ) {
-    tNtpUpdater.restartDelayed(TASK_MINUTE * 2);
-
-#ifdef _IOT_BLYNK_
-    if ( connectedToAP ) {
-      reportToIoT.setWaiting();
-      tIotReport.waitFor(&reportToIoT);
-    }
-#endif
-
-  }
-  else
-    sleepTime.signal(); // since NTP update was not requested, signal completion
 }
-
-void sleepTimeout() {
-
-#ifdef _DEBUG_ || _TEST_
-  Serial.print(millis());
-  Serial.println(F(": sleepTimeout."));
-#endif
-
-  sleepTime.signal();
-}
-
 
 bool flip = false;
 void cfgLed() {
-  flip = !flip;
-
   if (flip) {
     led();
+    tLedBlink.setInterval( ledOnDuration ); 
   }
   else {
     ledOnDisable();
+    tLedBlink.setInterval( ledOffDuration ); 
   }
+  flip = !flip;
+}
+
+bool ledOnEnable() {
+  flip = true;
+  return true;
 }
 
 void ledOnDisable() {
-  analogWrite(RGBLED_RED_PIN, 0);
-  analogWrite(RGBLED_GREEN_PIN, 0);
-  analogWrite(RGBLED_BLUE_PIN, 0);
-  flip = false;
+  digitalWrite(RGBLED_RED_PIN, LEDOFF);
+  digitalWrite(RGBLED_GREEN_PIN, LEDOFF);
+  digitalWrite(RGBLED_BLUE_PIN, LEDOFF);
 }
 
 void connectTOut() {
@@ -1237,17 +1247,20 @@ void serverTOut() {
   Serial.println(F(": serverTOut. Full stop."));
 #endif
 
-  ts.disableAll();
-
-  while (1) {
-    led(LEDON, 0, 0);
-    delay(2000);
-    led(0, 0, 0);
-    delay(500);
-  }
+  led(LEDON, LEDOFF, LEDOFF);
+  //  ts.disableAll();
+  //
+  //  while (1) {
+  //    led(LEDON, 0, 0);
+  //    delay(2000);
+  //    led(0, 0, 0);
+  //    delay(500);
+  //  }
+  delay(10UL * TASK_MINUTE);
+  if ( !runningAsAP ) resetDevice();
 }
 
-void onDisconnected(const WiFiEventStationModeDisconnected& event) {
+void onDisconnected(const WiFiEventStationModeDisconnected & event) {
 
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1262,7 +1275,7 @@ void onDisconnected(const WiFiEventStationModeDisconnected& event) {
 }
 
 
-void onClientConnected(const WiFiEventSoftAPModeStationConnected& event) {
+void onClientConnected(const WiFiEventSoftAPModeStationConnected & event) {
 
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1273,7 +1286,7 @@ void onClientConnected(const WiFiEventSoftAPModeStationConnected& event) {
   if ( numClients ) tHandleClients.restart();
 }
 
-void onClientDisconnected(const WiFiEventSoftAPModeStationDisconnected& event) {
+void onClientDisconnected(const WiFiEventSoftAPModeStationDisconnected & event) {
 
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1295,7 +1308,9 @@ void connectedChk() {
   if ( tConnected.isFirstIteration() ) {
     WiFi.hostname(CHost);
     WiFi.mode(WIFI_STA);
+    yield();
     WiFi.begin(parameters.ssid, parameters.pwd);
+    yield();
     //    delay(100);
     // set timeout
     tTimeout.set(CONNECT_TIMEOUT * TASK_SECOND, TASK_ONCE, &connectedChkTOut);
@@ -1318,6 +1333,7 @@ void connectedChkTOut () {
   Serial.println(F(": connectedChkTOut."));
 #endif
 
+  delay( 10UL * TASK_MINUTE );
   resetDevice();
 }
 
@@ -1356,7 +1372,7 @@ void sleepCallback() {
     ts.disableAll();
     WiFi.disconnect();
     SPIFFS.end();
-    ESP.deepSleep( ( tdesired - tnow ) * 1000000UL );
+    ESP.deepSleep( ( tdesired - tnow ) * 1000000UL, RF_NO_CAL );
     delay(100);
   }
   else {
@@ -1419,9 +1435,9 @@ void measureWL() {
   //  Serial.println(F(": measureWL.));
 #endif
 
-  pulseComplete.setWaiting();
-  tWaterLevel.waitFor(&pulseComplete);
+  //  pulseComplete.setWaiting();
   ping(4);
+  tWaterLevel.waitFor( tPing.getInternalStatusRequest() );
   if (tMesrLevel.getRunCounter() == (WL_SAMPLES + 1) ) measurementsReady.signal();
 }
 
@@ -1491,14 +1507,7 @@ void measureMS() {
 
   // on the 6th iteration signal that measurement is ready and reverese the current for 2 seconds
   if ( tMesrMoisture.getRunCounter() == ( HUM_SAMPLES + 1 ) ) {
-    tMesrMoisture.setInterval(TASK_SECOND + HUM_SAMPLES * 200);
-    probePowerReverse();
     measurementsReady.signal();
-  }
-
-  // after 2 seconds of reverse current - shut down
-  // the total measument time is 4 seconds
-  if ( tMesrMoisture.getRunCounter() > ( HUM_SAMPLES + 1 ) ) {
     tMesrMoisture.disable();
   }
 }
@@ -1539,8 +1548,7 @@ void measureCallback() {
   else {
     tMeasureRestart.disable();
     ledOff();
-    sleepTime.signal();
-    reportToIoT.signal();
+    wateringDone.signal();
   }
 }
 
@@ -1565,8 +1573,10 @@ void waterCallback() {
     water_log.num_runs++;
     tWater.setInterval( parameters.watertime * TASK_SECOND );
 
-    rgbRed = 0; rgbGreen = 0; rgbBlue = LEDON;
-    tLedBlink.set(50, TASK_FOREVER, &cfgLed, NULL, &ledOnDisable);
+    rgbRed = LEDOFF; rgbGreen = LEDOFF; rgbBlue = LEDON;
+    ledOnDuration = TASK_SECOND / 4;
+    ledOffDuration = ledOnDuration / 2;
+    tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
     tLedBlink.enable();
   }
   else { // even run
@@ -1574,17 +1584,19 @@ void waterCallback() {
     tWater.setInterval( parameters.saturate * TASK_MINUTE);
 
     ledOff();
-    tLedBlink.set(50, TASK_FOREVER, &ledSaturate, NULL, &ledOnDisable);
+    rgbRed = LEDOFF; rgbGreen = LEDOFF; rgbBlue = LEDON;
+    ledOnDuration = TASK_SECOND * 2;
+    ledOffDuration = TASK_SECOND / 4;
+    tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
     tLedBlink.enable();
   }
 }
-
-int delta = 20;
-void ledSaturate() {
-  rgbBlue += delta;
-  led();
-  if ( rgbBlue >= LEDON || rgbBlue <= 0 ) delta = -delta;
-}
+//
+//void ledSaturate() {
+//  rgbBlue += delta;
+//  led();
+//  if ( rgbBlue >= LEDON || rgbBlue <= 0 ) delta = -delta;
+//}
 
 
 
@@ -1618,8 +1630,8 @@ void waterOnDisable() {
   tMeasure.disable();
   tMeasureRestart.disable();
   tLedBlink.disable();
-  sleepTime.signal();
-  reportToIoT.signal();
+  wateringDone.signal();
+  //  reportToIoT.signal();
 }
 
 
@@ -1636,7 +1648,7 @@ void handleClientCallback() {
   server.handleClient();
   if ( server.client() ) {
     tHandleClients.forceNextIteration();
-    tSleepTimeout.restartDelayed();
+    tSleep.delay(SLEEP_TOUT);
   }
   else {
     tHandleClients.delay();
@@ -2021,7 +2033,7 @@ bool handleFileRead(String path) {
   return false;
 }
 
-void cpParams( byte* s, byte* d ) {
+void cpParams( byte * s, byte * d ) {
   for (int i = 0; i < sizeof(TParameters); i++, s++, d++) {
     *d = *s;
   }
@@ -2137,13 +2149,15 @@ String getContentType(String filename) {
 
 void configurePins() {
 #ifdef _DEBUG_
-  Serial.print(millis());
-  Serial.println(F(": configurePins."));
+  //  Serial.print(millis());
+  //  Serial.println(F(": configurePins."));
+  //  Serial.flush();
 #endif
+
+  pinMode(PUMP_PWR_PIN, OUTPUT); digitalWrite(PUMP_PWR_PIN, LOW);
 
   pinMode(MOISTURE_PIN, INPUT);
   pinMode(MOISTURE_PWR_PIN, OUTPUT); digitalWrite(MOISTURE_PWR_PIN, LOW);
-  pinMode(MOISTURE_GND_PIN, OUTPUT); digitalWrite(MOISTURE_GND_PIN, LOW);
 
   pinMode(RGBLED_RED_PIN, OUTPUT); digitalWrite(RGBLED_RED_PIN, LOW);
   pinMode(RGBLED_GREEN_PIN, OUTPUT); digitalWrite(RGBLED_GREEN_PIN, LOW);
@@ -2152,21 +2166,24 @@ void configurePins() {
   pinMode(SR04_ECHO_PIN, INPUT);
   pinMode(SR04_TRIGGER_PIN, OUTPUT); digitalWrite(SR04_TRIGGER_PIN, LOW);
 
-  pinMode(PUMP_PWR_PIN, OUTPUT); digitalWrite(PUMP_PWR_PIN, LOW);
   pinMode(LEAK_PIN, OUTPUT); digitalWrite(LEAK_PIN, LOW);
 }
 
 
 void setup() {
+#ifdef _DEBUG_ || _TEST_
+  Serial.begin(74880);
+  //  delay(5000);
+#endif
+
   configurePins();
+
+
+//  TESTLEDS();
+
   rtc.begin();
   rtc.adjust( DateTime(STATIC_TIME) );
   setSyncProvider(&getTime);   // the function to get the time from the RTC
-
-#ifdef _DEBUG_ || _TEST_
-  Serial.begin(74880);
-  delay(5000);
-#endif
 
   hasNtp = false;
   if ( ESP.getResetReason() != CWakeReasonReset ) {
@@ -2222,19 +2239,20 @@ void setup() {
 
   if ( !isNight() ) {
     //    for (int i = 0; i < 3; i++) {
-    led(LEDON, 0, 0); delay(500);
-    led(0, LEDON, 0); delay(500);
-    led(0, 0, LEDON); delay(500);
-    led(0, 0, 0); delay(500);
-    //    }
+    led(LEDON, LEDOFF, LEDOFF); delay(500);
+    led(LEDOFF, LEDON, LEDOFF); delay(500);
+    led(LEDOFF, LEDOFF, LEDON); delay(500);
+    ledOff(); delay(500);
   }
+
 
 #ifdef _TEST_ || _DEBUG_
   led(LEDON, LEDON, LEDON);
+  Serial.println(F("_TEST_ or _DEBUG_ - lights out"));
   delay(5000);
 #endif
 
-  led(0, 0, 0);
+  ledOff();
 
 
   ts.setHighPriorityScheduler(&hpts);
@@ -2337,9 +2355,9 @@ const char* blynk_host = "blynk-cloud.com";
 unsigned int blynk_port = 8080;
 WiFiClient blynk_client;
 
-bool httpRequest(const String& method,
-                 const String& request,
-                 String&       response)
+bool httpRequest(const String & method,
+                 const String & request,
+                 String &       response)
 {
 #ifdef _DEBUG_
   Serial.print(F("Connecting to "));
@@ -2395,55 +2413,68 @@ bool httpRequest(const String& method,
   }
 
   //Serial.println("Reading response body");
+
+  uint8_t buf[512];
   response = "";
-  response.reserve(contentLength + 1);
-  while (response.length() < contentLength && blynk_client.connected()) {
-    while (blynk_client.available()) {
-      char c = blynk_client.read();
-      response += c;
-    }
-  }
-  blynk_client.stop();
-  return true;
-}
+  //  response.reserve(contentLength + 1);
 
-
-void iot_report() {
-  String putData = String("[\"") + currentHumidity + "\"]";
-  String response;
-
-  if (httpRequest(String("PUT /") + blynk_auth + "/update/V0", putData, response)) {
-    if (response.length() != 0) {
-
-#ifdef _DEBUG_
-      Serial.print("WARNING: ");
-      Serial.println(response);
-#endif
-    }
-  }
-
-  putData = String("[\"") + currentWaterLevel + "\"]";
-  if (httpRequest(String("PUT /") + blynk_auth + "/update/V1", putData, response)) {
-    if (response.length() != 0) {
-
-#ifdef _DEBUG_
-      Serial.print("WARNING: ");
-      Serial.println(response);
-#endif
-    }
-  }
-
-  //  putData = String("[\"") + currentHumidity + "\"]";
-  //  if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
-  //    if (response.length() != 0) {
-  //
-  //#ifdef _DEBUG_
-  //      Serial.print("WARNING: ");
-  //      Serial.println(response);
-  //#endif
+  //  while (response.length() < contentLength && blynk_client.connected()) {
+  //    while (blynk_client.available()) {
+  //      char c = blynk_client.read();
+  //      response += c;
   //    }
   //  }
+  //  blynk_client.stop();
+  if ( blynk_client.connected() ) {
+    blynk_client.read(buf, contentLength);
+    buf[contentLength] = 0;
+    response = String( (char*) buf );
+  }
+  return true;
+}
+#endif
 
+void iot_report() {
+
+  if ( connectedToAP ) {
+#ifdef _IOT_BLYNK_
+
+    String putData = String("[\"") + currentHumidity + "\"]";
+    String response;
+
+    if (httpRequest(String("PUT /") + blynk_auth + "/update/V0", putData, response)) {
+      if (response.length() != 0) {
+
+#ifdef _DEBUG_
+        Serial.print("WARNING: ");
+        Serial.println(response);
+#endif
+      }
+    }
+
+    putData = String("[\"") + currentWaterLevel + "\"]";
+    if (httpRequest(String("PUT /") + blynk_auth + "/update/V1", putData, response)) {
+      if (response.length() != 0) {
+
+#ifdef _DEBUG_
+        Serial.print("WARNING: ");
+        Serial.println(response);
+#endif
+      }
+    }
+
+    //  putData = String("[\"") + currentHumidity + "\"]";
+    //  if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
+    //    if (response.length() != 0) {
+    //
+    //#ifdef _DEBUG_
+    //      Serial.print("WARNING: ");
+    //      Serial.println(response);
+    //#endif
+    //    }
+    //  }
+#endif
+  }
 }
 
-#endif
+
