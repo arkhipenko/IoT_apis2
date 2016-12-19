@@ -107,7 +107,7 @@
 #define CONNECT_TIMEOUT 30  //seconds
 #define NTP_TIMEOUT     20  //seconds
 #define CONNECT_BLINK   260 // ms
-#define WL_PERIOD       200 // ms
+#define WL_PERIOD       100 // ms
 
 #define CONNECT_INTRVL  2000 // check every 2 seconds
 #define NTPUPDT_INTRVL  2000 // check every 2 seconds
@@ -116,7 +116,7 @@
 // ----
 // Moisture probe analog pin
 #define MOISTURE_PIN      A0  // A0
-#define MOISTURE_PWR_PIN  D7  // D8  //13  // D7
+#define MOISTURE_PWR_PIN  D8  //13  // D7
 #define SENSOR_OUT_VALUE  1000
 
 #define LEAK_PIN          D5
@@ -146,9 +146,8 @@ const char *CDSsid  = "Plant_";
 const char *CDPwd   = "changeme!";
 const char *CHost  = "plant.io";
 String ssid, pwd;
-
 #ifndef _TEST_
-#define  TICKER          TASK_HOUR
+#define  TICKER          (TASK_MINUTE * 10) // TASK_HOUR
 #define  SLEEP_TOUT      TASK_MINUTE
 
 int   currentHumidity = 0;
@@ -160,10 +159,6 @@ int   currentWaterLevel = 0;
 int   currentHumidity = 60;
 int   currentWaterLevel = 200;
 #endif
-
-#define TMEASURE_WATERTIME  5  // measure every 5 seconds while watering
-#define MEASURE_PRIME       5  // 5 seconds
-#define MEASURE_TIMES       3  // measure this number of times to average the value
 
 const char* CWakeReasonSleep = "Deep-Sleep Wake";
 const char* CWakeReasonReset = "External System";
@@ -182,7 +177,9 @@ bool waterOnenable();
 void waterOndisable();
 void measureCallback();
 void measureWL();
+bool measureWLOnEnable();
 void measureMS();
+bool measureMSOnEnable();
 void measureMSOnDisable();
 void ticker();
 
@@ -228,8 +225,8 @@ Task tTicker        (TICKER, TASK_FOREVER, &ticker, &ts, false);
 Task tMeasure       (&measureCallback, &ts);
 Task tMeasureRestart(&measureRestart, &ts);
 
-Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false); //, &measureWLOnEnable, NULL);
-Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, NULL, &measureMSOnDisable);
+Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false, &measureWLOnEnable, NULL);
+Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, &measureMSOnEnable, &measureMSOnDisable);
 
 Task tWater         (TASK_IMMEDIATE, TASK_ONCE, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
 
@@ -477,8 +474,8 @@ void pingTOut() {
 }
 
 
-#define WL_SAMPLES  5
-long  wlData[WL_SAMPLES];           // Water level is averaged based on 5 measurements
+#define   WL_SAMPLES  10
+long      wlData[WL_SAMPLES];           // Water level is averaged based on 5 measurements
 avgFilter wl(WL_SAMPLES, wlData);   // Average filter for water level measurements
 
 /**
@@ -487,10 +484,6 @@ avgFilter wl(WL_SAMPLES, wlData);   // Average filter for water level measuremen
 */
 void waterLevelCalc() {
   long cwl = 0;
-
-#ifdef _DEBUG_
-  long d, mm;
-#endif
 
 #ifdef _TEST_
   return;
@@ -501,17 +494,15 @@ void waterLevelCalc() {
     // 343 m/s = 343000 mm/s = 0.343 mm/us. double distance = 0.1715 mm/us
     cwl = parameters.wl_depth - (pulseStop - pulseStart) * US_TO_MM_FACTOR / 1000;
 
-#ifdef _DEBUG_
-    d = pulseStop - pulseStart;
-    mm = d * US_TO_MM_FACTOR / 1000;
-#endif
-
     if ( cwl < 0 ) cwl = 0;
     if ( cwl > parameters.wl_depth ) cwl = parameters.wl_depth;
   }
   currentWaterLevel = wl.value(cwl);
 
 #ifdef _DEBUG_
+  //  long d, mm;
+  //  d = pulseStop - pulseStart;
+  //  mm = d * US_TO_MM_FACTOR / 1000;
   //  Serial.print(millis());
   //  Serial.print(F(": waterLevelCalc. d = "));
   //  Serial.println(d);
@@ -1285,7 +1276,7 @@ void cfgLed() {
 
 /**
   Ensures that blinking start with LED ON state
-  */
+*/
 bool ledOnEnable() {
   flip = true;
   return true;
@@ -1293,7 +1284,7 @@ bool ledOnEnable() {
 
 /**
   Ensures LED is OFF after blinking is disabled
-  */
+*/
 void ledOnDisable() {
   digitalWrite(RGBLED_RED_PIN, LEDOFF);
   digitalWrite(RGBLED_GREEN_PIN, LEDOFF);
@@ -1304,7 +1295,7 @@ void ledOnDisable() {
   Connect to AP timeout.
   Tries to set up the device as Access Point
   NOTE: ALWAYS USES THE DEFAULT AP SSID/PASSWORD
-  */
+*/
 void connectTOut() {
 
 #ifdef _DEBUG_
@@ -1331,7 +1322,7 @@ void connectTOut() {
 /**
   NTP update timeout.
   Suppose to turn LED AMBER
-  */
+*/
 void ntpTOut() {
 
 #ifdef _DEBUG_
@@ -1346,7 +1337,7 @@ void ntpTOut() {
 
 /**
   Soft AP timeout - at this point device has no connectivity and will reset itsef in 10 minutes
-  */
+*/
 void serverTOut() {
 
 #ifdef _DEBUG_
@@ -1354,15 +1345,22 @@ void serverTOut() {
   Serial.println(F(": serverTOut. Full stop."));
 #endif
 
-  led(LEDON, LEDOFF, LEDOFF);
-  delay(10UL * TASK_MINUTE);
-  if ( !runningAsAP ) resetDevice();
+  // The main task is still is to water the plant, even if there is no connectivity
+
+  //  led(LEDON, LEDOFF, LEDOFF);
+  //  delay(10UL * TASK_MINUTE);
+  //  if ( !runningAsAP ) resetDevice();
+
+  tLedBlink.disable();
+  tTimeout.disable();
+  tConfigure.yield(&cfgFinish);
+  runningAsAP = false;
 }
 
 
 /**
-  This event is called when a station disconnects from wireless network 
-  */
+  This event is called when a station disconnects from wireless network
+*/
 void onDisconnected(const WiFiEventStationModeDisconnected & event) {
 
 #ifdef _DEBUG_
@@ -1378,8 +1376,8 @@ void onDisconnected(const WiFiEventStationModeDisconnected & event) {
 }
 
 /**
-  This event is called when a station connects to Soft AP 
-  */
+  This event is called when a station connects to Soft AP
+*/
 void onClientConnected(const WiFiEventSoftAPModeStationConnected & event) {
 
 #ifdef _DEBUG_
@@ -1393,8 +1391,8 @@ void onClientConnected(const WiFiEventSoftAPModeStationConnected & event) {
 
 
 /**
-  This event is called when a station disconnects from Soft AP 
-  */
+  This event is called when a station disconnects from Soft AP
+*/
 void onClientDisconnected(const WiFiEventSoftAPModeStationDisconnected & event) {
 
 #ifdef _DEBUG_
@@ -1408,8 +1406,8 @@ void onClientDisconnected(const WiFiEventSoftAPModeStationDisconnected & event) 
 }
 
 /**
-  Attempts to reconnect to wireless network after connection is lost 
-  */
+  Attempts to reconnect to wireless network after connection is lost
+*/
 void connectedChk() {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1438,8 +1436,8 @@ void connectedChk() {
 
 
 /**
-  Reconnection attempts timeout - device is reset after 10 mimutes 
-  */
+  Reconnection attempts timeout - device is reset after 10 mimutes
+*/
 void connectedChkTOut () {
 
 #ifdef _DEBUG_
@@ -1447,7 +1445,7 @@ void connectedChkTOut () {
   Serial.println(F(": connectedChkTOut."));
 #endif
 
-  delay( 10UL * TASK_MINUTE );
+  delay( TASK_MINUTE );
   resetDevice();
 }
 
@@ -1455,15 +1453,15 @@ void connectedChkTOut () {
 /**
   Deep Sleep callback
   Current watering results and projected ntp time at wake up are stored
-  Device is put into deep sleep mode after that 
-  */
+  Device is put into deep sleep mode after that
+*/
 void sleepCallback() {
 #ifdef _DEBUG_
   Serial.print(millis());
   Serial.println(F(": sleepCallback."));
 #endif
   time_t tnow = now();
-  time_t ticker = TICKER / 1000;
+  time_t ticker = TICKER / 1000UL;
   time_t tdesired = ticker + tickTime;
 
   if ( tdesired > tnow ) {
@@ -1500,8 +1498,8 @@ void sleepCallback() {
 }
 
 /**
-  Saves provided time to RTC memory 
-  */
+  Saves provided time to RTC memory
+*/
 void saveTimeToRTC (unsigned long aUt) {
   time_restore.magic = MAGIC_NUMBER;
   time_restore.ccode = ~time_restore.magic;
@@ -1514,8 +1512,8 @@ void saveTimeToRTC (unsigned long aUt) {
 }
 
 /**
-  Resets the device 
-  */
+  Resets the device
+*/
 void resetDevice() {
 
 #ifdef _DEBUG_
@@ -1547,9 +1545,16 @@ void resetDevice() {
 // =============
 
 /**
+  Initialize average filter at the beginning of the measurement
+*/
+bool measureWLOnEnable() {
+  wl.initialize();
+  return true;
+}
+/**
   Initiate water level measurement with a timeout of 4 milliseconds (or ~ XX cm)
-  Allows collection of minimal necessary samples to properly average the waterlevel  
-  */
+  Allows collection of minimal necessary samples to properly average the waterlevel
+*/
 void measureWL() {
 
 #ifdef _DEBUG_
@@ -1560,14 +1565,14 @@ void measureWL() {
   //  pulseComplete.setWaiting();
   ping(4);
   tWaterLevel.waitFor( tPing.getInternalStatusRequest() );
-  if (tMesrLevel.getRunCounter() == (WL_SAMPLES + 1) ) measurementsReady.signal();
+  if (tMesrLevel.getRunCounter() == (2 * WL_SAMPLES + 1) ) measurementsReady.signal();
 }
 
 
 
 /**
-  Measured current humidity based on the ADC reading and updates the average filtered value 
-  */
+  Measured current humidity based on the ADC reading and updates the average filtered value
+*/
 // Measurment and Watering
 #define HUM_SAMPLES  5
 long  humData[HUM_SAMPLES];
@@ -1600,8 +1605,17 @@ long measureHumidity()
 }
 
 /**
+  Initialize average filter at the beginning of the measurement
+*/
+bool measureMSOnEnable() {
+  hum.initialize();
+  return true;
+}
+
+
+/**
   When Soil humidity measurement finishes, turns off power on the humidity probe, signals that probe is idle and disables water level measurement
-  */
+*/
 void measureMSOnDisable() {
   probePowerOff();
   probeIdle.signal();
@@ -1611,8 +1625,8 @@ void measureMSOnDisable() {
 
 /**
   Primes the humidity probe for 1 second
-  then signals that humidity measurement value is ready  
-  */
+  then signals that humidity measurement value is ready
+*/
 void measureMS() {
 
   // One second to "warm up" the probe
@@ -1622,17 +1636,17 @@ void measureMS() {
     tMeasureRestart.waitFor(&probeIdle);
 
     //    hum.initialize();
-    tMesrMoisture.setInterval(TASK_SECOND / 5);
-    tMesrMoisture.delay(TASK_SECOND);
+    tMesrMoisture.setInterval( TASK_SECOND / 2 );
+    tMesrMoisture.delay( TASK_SECOND );
     return;
   }
 
   // then 5 measuments every 200 ms to collect an average of 5
-  if ( tMesrMoisture.getRunCounter() <= ( HUM_SAMPLES + 1) )
+  if ( tMesrMoisture.getRunCounter() <= ( 2 * HUM_SAMPLES + 1) )
     currentHumidity = measureHumidity();
 
   // on the 6th iteration signal that measurement is ready and reverese the current for 2 seconds
-  if ( tMesrMoisture.getRunCounter() == ( HUM_SAMPLES + 1 ) ) {
+  if ( tMesrMoisture.getRunCounter() == ( 2 * HUM_SAMPLES + 1 ) ) {
     measurementsReady.signal();
     tMesrMoisture.disable();
   }
@@ -1640,8 +1654,8 @@ void measureMS() {
 
 
 /**
-  Main measure callback which decides whether watering should occur or stop 
-  */
+  Main measure callback which decides whether watering should occur or stop
+*/
 void measureCallback() {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -1685,8 +1699,8 @@ void measureCallback() {
   Measurement restart method
   Restarts measurements when previous measurements are ready
   Since pump run draws current, it may affect accuracy of the soil humidity measurement,
-  therefore no measurements takes place during the actual watering run when pump is active 
-  */
+  therefore no measurements takes place during the actual watering run when pump is active
+*/
 void measureRestart() {
   if ( tWater.isEnabled() && ( tWater.getRunCounter() & 1 ) ) {  // Do not measure durint watering run - brown-outs affect accuracy
     tMeasureRestart.restartDelayed( TASK_SECOND );
@@ -1702,7 +1716,7 @@ void measureRestart() {
 
 /**
   Main watering method - decides how long the watering and saturation runs should take
-  */
+*/
 void waterCallback() {
 
 #ifdef _DEBUG_
@@ -1736,8 +1750,8 @@ void waterCallback() {
 }
 
 /**
-  Start of watering. Makes sure device is allowed to water and initiates the log entry 
-  */
+  Start of watering. Makes sure device is allowed to water and initiates the log entry
+*/
 bool waterOnEnable() {
 
   if ( !canWater() ) {
@@ -1760,7 +1774,7 @@ bool waterOnEnable() {
 
 /**
   Stop of watering. Turns the pump off. Makes sure log entry is completed
-  */
+*/
 void waterOnDisable() {
   motorOff();
 
@@ -2295,6 +2309,11 @@ void configurePins() {
   //  Serial.flush();
 #endif
 
+
+//  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_GPIO15);  // Set D8 function
+  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0);  // Set D3 up
+  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);  // Set D3 up
+  
   pinMode(PUMP_PWR_PIN, OUTPUT); digitalWrite(PUMP_PWR_PIN, LOW);
 
   pinMode(MOISTURE_PIN, INPUT);
