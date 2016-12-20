@@ -8,8 +8,20 @@
   2016-11-29
     v0.1.0 - work started
 
-  2016-12-17
+  2016-12-17:
     v1.0.0 - First release
+
+  2016-12-20:
+    V1.0.1 - Replaced ultrasonic sensor from HC-SR04 (4 pins) to Ping sensor from Dexter tech (3 pins) to free up one pin.
+             The issue is I ranout of pins, and device refuses to reset with pins D3 and D4 connected to HC-SR04 echo and trig pins
+             (probably due to overuse of pin functions on esp8266). Also went with straight PulseIn apprioach for distance measurement.
+             Reason: it is only 1500 microseconds tops for 23 cm max distance, so not much of a delay.
+           - Added a 10 second delay after initialization to allow voltage and current to stabilize after extensive use of LEDs before
+             taking ADC measurement.
+           - Webserver is stopped during measurement and watering runs. According to Expressif docu ADC measurements could be incorrect 
+             if device is transmitting during taking a measurement. 
+           - PowerSave deep sleep timeout is extended to 3 minutes if client connects to the webserver to allow adequate time for parameter
+             updates
 
   ----------------------------------------*/
 
@@ -147,19 +159,21 @@ const char *CDSsid  = "Plant_";
 const char *CDPwd   = "changeme!";
 const char *CHost  = "plant.io";
 String ssid, pwd;
+
 #ifndef _TEST_
-#define  TICKER          (TASK_MINUTE * 15) // update every 30 minutes (15 for initial testing phase)
-#define  SLEEP_TOUT      TASK_MINUTE
+#define  TICKER          (TASK_MINUTE * 15) // probe every 30 minutes (15 for initial testing phase)
 
 int   currentHumidity = 0;
 int   currentWaterLevel = 0;
 #else
-#define  TICKER          (TASK_MINUTE * 3)  // in test mose update every 3 minutes
-#define  SLEEP_TOUT      TASK_MINUTE
+#define  TICKER          (TASK_MINUTE * 3)  // in test mose probe every 3 minutes
 
 int   currentHumidity = 60;
 int   currentWaterLevel = 200;
 #endif
+
+#define  SLEEP_TOUT      TASK_MINUTE
+#define  SLEEP_TOUT_CONN (TASK_MINUTE * 3)
 
 const char* CWakeReasonSleep = "Deep-Sleep Wake";
 const char* CWakeReasonReset = "External System";
@@ -197,7 +211,9 @@ void serverHandleNotFound();
 void sleepCallback();
 
 void resetDevice();
-void  iot_report();
+void iot_report();
+
+void connectionEnforcer();
 
 // Task Scheduling
 // ---------------
@@ -214,12 +230,12 @@ Task tTest          (TASK_SECOND * 10, TASK_FOREVER, &testTicker, &ts, true);
 Task tConfigure     (TASK_IMMEDIATE, TASK_ONCE, &cfgInit, &ts, true);
 Task tLedBlink      (TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ts, false, &ledOnEnable, &ledOnDisable);
 Task tTimeout       (TASK_IMMEDIATE, TASK_FOREVER, NULL, &ts);
-Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts, false);
-Task tConnected     (TASK_SECOND, TASK_FOREVER, &connectedChk, &ts, false);
+Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts);
+Task tConnected     (TASK_SECOND, TASK_FOREVER, &connectedChk, &ts);
 
-Task tHandleClients (TASK_SECOND, TASK_FOREVER, &handleClientCallback, &ts, false);
+Task tHandleClients (TASK_SECOND, TASK_FOREVER, &handleClientCallback, &ts);
 
-Task tTicker        (TICKER, TASK_FOREVER, &ticker, &ts, false);
+Task tTicker        (TICKER, TASK_FOREVER, &ticker, &ts);
 
 Task tMeasure       (&measureCallback, &ts);
 Task tMeasureRestart(&measureRestart, &ts);
@@ -229,16 +245,12 @@ Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, &measure
 
 Task tWater         (TASK_IMMEDIATE, TASK_ONCE, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
 
-//Task tPing          (TASK_IMMEDIATE, TASK_ONCE, &pingTOut, &hpts, false);
-//Task tWaterLevel    (&waterLevelCalc, &hpts);
-
 Task tSleep         (&sleepCallback, &ts);
 
 Task tIotReport     (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
 
 Task tReset         (&resetDevice, &ts);
-
-
+Task tEnforcer      (TASK_HOUR, TASK_ONCE, &connectionEnforcer, &ts);
 
 
 // Parameters
@@ -288,7 +300,7 @@ typedef struct {
 TTimeStored   time_restore;
 
 #define       MAGIC_NUMBER  1234567890UL
-#define       WAKE_DELAY    1            // 3 seconds to wake up 
+#define       WAKE_DELAY    0            // 3 seconds to wake up 
 
 typedef struct {
   time_t    water_start;  // time watering run started
@@ -1136,7 +1148,11 @@ void cfgFinish() {  // WiFi config successful
   Serial.println(F(": cfgFinish."));
 #endif
 
+  led();
+  delay(TASK_SECOND);
   led(LEDON, LEDON, LEDON);
+  delay(500);
+  ledOff();
 
   SPIFFS.begin();
   server.on("/", serverHandleRoot);
@@ -1171,7 +1187,8 @@ void cfgFinish() {  // WiFi config successful
   server.begin();
 
   if ( connectedToAP ) tHandleClients.restart();
-  tTicker.restart();
+
+  tTicker.restartDelayed( TASK_SECOND * 10 );
 
   iot_started();
 
@@ -1202,13 +1219,18 @@ void ticker() {
 
   tickTime = now();
 
+  server.stop();  // disable server not ot affect measurements
+  tHandleClients.disable();
+
   tMeasureRestart.restart();
   wateringDone.setWaiting();
-  tIotReport.waitFor( &wateringDone );
+  tIotReport.waitFor( &wateringDone ); // server will restart whe IoT report is ready
 
   if ( parameters.powersave ) {
     tSleep.waitForDelayed( tNtpUpdater.getInternalStatusRequest(), SLEEP_TOUT, TASK_ONCE );
   }
+
+//  if ( isNight() ) tTicker.delay(TASK_HOUR);
 }
 
 /**
@@ -1284,7 +1306,7 @@ void ntpTOut() {
 #endif
 
   tLedBlink.disable();
-  rgbRed = LEDON; rgbGreen = 212 * (LEDON / 255); rgbBlue = 0;  // configure as yellow
+  rgbRed = LEDON; rgbGreen = 182 * (LEDON / 255); rgbBlue = 0;  // configure as yellow
   tConfigure.yield(&cfgFinish);  // configure as server
 }
 
@@ -1295,7 +1317,7 @@ void serverTOut() {
 
 #ifdef _DEBUG_
   Serial.print(millis());
-  Serial.println(F(": serverTOut. Full stop."));
+  Serial.println(F(": serverTOut."));
 #endif
 
   // The main task is still is to water the plant, even if there is no connectivity
@@ -1306,8 +1328,11 @@ void serverTOut() {
 
   tLedBlink.disable();
   tTimeout.disable();
+
+  rgbRed = LEDON; rgbGreen = LEDOFF; rgbBlue = LEDON;  // configure as yellow
   tConfigure.yield(&cfgFinish);
   runningAsAP = false;
+  tEnforcer.restartDelayed();
 }
 
 
@@ -1322,7 +1347,7 @@ void onDisconnected(const WiFiEventStationModeDisconnected & event) {
 #endif
 
   if ( connectedToAP ) {
-    WiFi.disconnect();
+    //    WiFi.disconnect();
     tConnected.restartDelayed(TASK_SECOND);
     connectedToAP = false;
   }
@@ -1389,7 +1414,8 @@ void connectedChk() {
 
 
 /**
-  Reconnection attempts timeout - device is reset after 10 mimutes
+  Reconnection attempts timeout
+  Device will be reset in 1 hour time to re-attempt connection per config
 */
 void connectedChkTOut () {
 
@@ -1398,8 +1424,10 @@ void connectedChkTOut () {
   Serial.println(F(": connectedChkTOut."));
 #endif
 
-  delay( TASK_MINUTE );
-  resetDevice();
+  connectedToAP = false;
+  tTimeout.disable();
+  tConnected.disable();
+  tEnforcer.restartDelayed();
 }
 
 
@@ -1415,7 +1443,7 @@ void sleepCallback() {
 #endif
 
   iot_sleep();
-  
+
   time_t tnow = now();
   time_t ticker = TICKER / 1000UL;
   time_t tdesired = ticker + tickTime;
@@ -1496,6 +1524,19 @@ void resetDevice() {
   delay(100);
 }
 
+
+/**
+   Checks if device is running in the correct connectivity mode and resets it otherwise
+*/
+void connectionEnforcer() {
+  if ( parameters.is_ap == 0 && !connectedToAP ) { // device should be connected to the WiFi
+    resetDevice();
+  }
+
+  if ( parameters.is_ap == 1 && !runningAsAP ) { // device should be running in local AP mode
+    resetDevice();
+  }
+}
 
 // Water section
 // =============
@@ -1755,11 +1796,11 @@ void handleClientCallback() {
   //      Serial.println(F(": handleClientCallback."));
 #endif
 
-  if ( !connectedToAP ) dnsServer.processNextRequest();
+  if ( runningAsAP ) dnsServer.processNextRequest();
   server.handleClient();
   if ( server.client() ) {
     tHandleClients.forceNextIteration();
-    tSleep.delay(SLEEP_TOUT);
+    tSleep.delay(SLEEP_TOUT_CONN);
   }
   else {
     tHandleClients.delay();
@@ -2267,7 +2308,6 @@ void configurePins() {
 #endif
 
 
-  //  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_GPIO15);  // Set D8 function
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0);  // Set D3 up
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);  // Set D3 up
 
@@ -2280,6 +2320,8 @@ void configurePins() {
   pinMode(RGBLED_GREEN_PIN, OUTPUT); digitalWrite(RGBLED_GREEN_PIN, LOW);
   pinMode(RGBLED_BLUE_PIN, OUTPUT); digitalWrite(RGBLED_BLUE_PIN, LOW);
 
+  //  Pins for Dexter US sensor are flipped between INPUT and OUTPUT and 
+  //  therefore are initialized during ping()
   //  pinMode(SR04_ECHO_PIN, INPUT);
   //  pinMode(SR04_TRIGGER_PIN, OUTPUT); digitalWrite(SR04_TRIGGER_PIN, LOW);
 
@@ -2591,7 +2633,11 @@ void iot_sleep() {
 
 void iot_report() {
 
+  server.begin();  // restart server
+
   if ( connectedToAP ) {
+    tHandleClients.restart();
+
 #ifdef _IOT_BLYNK_
 
     String putData = String("[\"") + currentHumidity + "\"]";
