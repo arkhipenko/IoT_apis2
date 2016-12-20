@@ -56,6 +56,7 @@
 // Natural constants
 #define US_TO_MM_FACTOR (100000/583)
 #define STATIC_TIME     1451606400UL
+#define PING_TIMEOUT    2000UL
 #define SD3             10
 
 // Watering parameter defaults
@@ -131,7 +132,7 @@
 #define   LEDSTAY         (-1)
 
 // HC-SR04 ultrasound sensor
-#define SR04_TRIGGER_PIN  D4  // D5 nodemcu pin
+//#define SR04_TRIGGER_PIN  D4  // D5 nodemcu pin
 #define SR04_ECHO_PIN     D3  //  nodemcu pin
 
 // PUMP pins
@@ -147,13 +148,13 @@ const char *CDPwd   = "changeme!";
 const char *CHost  = "plant.io";
 String ssid, pwd;
 #ifndef _TEST_
-#define  TICKER          (TASK_MINUTE * 10) // TASK_HOUR
+#define  TICKER          (TASK_MINUTE * 15) // update every 30 minutes (15 for initial testing phase)
 #define  SLEEP_TOUT      TASK_MINUTE
 
 int   currentHumidity = 0;
 int   currentWaterLevel = 0;
 #else
-#define  TICKER          (TASK_MINUTE * 3)
+#define  TICKER          (TASK_MINUTE * 3)  // in test mose update every 3 minutes
 #define  SLEEP_TOUT      TASK_MINUTE
 
 int   currentHumidity = 60;
@@ -183,8 +184,6 @@ bool measureMSOnEnable();
 void measureMSOnDisable();
 void ticker();
 
-void pingTOut();
-void waterLevelCalc();
 void measureRestart();
 
 void waterCallback();
@@ -230,8 +229,8 @@ Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, &measure
 
 Task tWater         (TASK_IMMEDIATE, TASK_ONCE, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
 
-Task tPing          (TASK_IMMEDIATE, TASK_ONCE, &pingTOut, &hpts, false);
-Task tWaterLevel    (&waterLevelCalc, &hpts);
+//Task tPing          (TASK_IMMEDIATE, TASK_ONCE, &pingTOut, &hpts, false);
+//Task tWaterLevel    (&waterLevelCalc, &hpts);
 
 Task tSleep         (&sleepCallback, &ts);
 
@@ -356,11 +355,12 @@ WiFiEventHandler clientDisconnectedEventHandler;
 unsigned int numClients;
 
 // Ultrasonic measurment related
-volatile bool pulseBusy = false;
-volatile bool pulseTimeout = false;
-volatile unsigned long pulseStart = 0;
-volatile unsigned long pulseStop = 0;
-volatile bool clockStarted = false;
+//volatile bool pulseBusy = false;
+//volatile bool pulseTimeout = false;
+//volatile unsigned long pulseStart = 0;
+//volatile unsigned long pulseStop = 0;
+//volatile bool clockStarted = false;
+unsigned long distance;
 
 // Code
 // ------------------------------------------------------------------
@@ -419,84 +419,36 @@ void testTicker() {
 // ---------------
 
 /**
-   Initiates interrupt driven ultrasonic distance measurement
+   Calculates water level based on the distance to water surface
+   measured by the utrasonic sensor
 */
-void ping(unsigned long aTimeout) {  // in millis
-
-#ifdef _TEST_
-  tPing.disable();
-  return;
-#endif
-
-  pulseBusy = true;
-  pulseTimeout = false;
-  digitalWrite(SR04_TRIGGER_PIN, LOW);
-  delayMicroseconds(4);
-  digitalWrite(SR04_TRIGGER_PIN, HIGH);
-  tPing.setInterval (aTimeout);
-  pulseStart = 0;
-  clockStarted = false;
-  delayMicroseconds(10);
-  digitalWrite(SR04_TRIGGER_PIN, LOW);
-  attachInterrupt(SR04_ECHO_PIN, &pingStartStopClock, CHANGE);
-  tPing.restartDelayed();
-}
-
-/**
-   This method is called on the leading and falling edge of the ultrasonic wave
-   We take two microseconds readings for later distance calculation
-*/
-void pingStartStopClock() {
-  if (clockStarted) {
-    pulseStop = micros();
-    detachInterrupt(SR04_ECHO_PIN);
-    pulseBusy = false;
-    tPing.disable();
-    //    pulseComplete.signal();
-  }
-  else {
-    pulseStart = micros();
-    clockStarted = true;
-    tPing.restartDelayed();
-  }
-}
-
-/**
-   Utrasonic distance measurment timeout method.
-   If called, the distance is beyond our range
-*/
-void pingTOut() {
-  if (pulseBusy) {
-    clockStarted = true;
-    pingStartStopClock();
-  }
-  pulseTimeout = true;
-}
-
 
 #define   WL_SAMPLES  10
 long      wlData[WL_SAMPLES];           // Water level is averaged based on 5 measurements
 avgFilter wl(WL_SAMPLES, wlData);   // Average filter for water level measurements
 
-/**
-   Calculates water level based on the distance to water surface
-   measured by the utrasonic sensor
-*/
-void waterLevelCalc() {
-  long cwl = 0;
+void ping(unsigned long aTimeout) {  // in micros
 
 #ifdef _TEST_
   return;
 #endif
 
-  if (pulseTimeout) cwl = 0;
-  else {
-    // 343 m/s = 343000 mm/s = 0.343 mm/us. double distance = 0.1715 mm/us
-    cwl = parameters.wl_depth - (pulseStop - pulseStart) * US_TO_MM_FACTOR / 1000;
+  pinMode(SR04_ECHO_PIN, OUTPUT);
+  digitalWrite(SR04_ECHO_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(SR04_ECHO_PIN, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(SR04_ECHO_PIN, LOW);
+  pinMode(SR04_ECHO_PIN, INPUT);
+  delayMicroseconds(5);
 
-    if ( cwl < 0 ) cwl = 0;
-    if ( cwl > parameters.wl_depth ) cwl = parameters.wl_depth;
-  }
+  long duration, cwl;
+
+  duration = pulseIn(SR04_ECHO_PIN, HIGH, aTimeout);
+  if ( duration == 0 ) duration = aTimeout;
+  cwl  = parameters.wl_depth - ( duration * 100UL / 580UL + 10UL );
+  if ( cwl < 0 ) cwl = 0;
+  if ( cwl > parameters.wl_depth ) cwl = parameters.wl_depth;
   currentWaterLevel = wl.value(cwl);
 
 #ifdef _DEBUG_
@@ -521,7 +473,6 @@ void waterLevelCalc() {
    Turns pump motor on/off depending on the state
 
    @param: aState: true - turn the pump on; false - turn the pump off
-
 */
 void motorState(bool aState) {
   digitalWrite(PUMP_PWR_PIN, aState ? HIGH : LOW);
@@ -1222,6 +1173,8 @@ void cfgFinish() {  // WiFi config successful
   if ( connectedToAP ) tHandleClients.restart();
   tTicker.restart();
 
+  iot_started();
+
 #ifdef _DEBUG_
   Serial.println("HTTP server started");
 #endif
@@ -1460,6 +1413,9 @@ void sleepCallback() {
   Serial.print(millis());
   Serial.println(F(": sleepCallback."));
 #endif
+
+  iot_sleep();
+  
   time_t tnow = now();
   time_t ticker = TICKER / 1000UL;
   time_t tdesired = ticker + tickTime;
@@ -1563,8 +1519,9 @@ void measureWL() {
 #endif
 
   //  pulseComplete.setWaiting();
-  ping(4);
-  tWaterLevel.waitFor( tPing.getInternalStatusRequest() );
+  ping( PING_TIMEOUT );
+
+  //  tWaterLevel.waitFor( tPing.getInternalStatusRequest() );
   if (tMesrLevel.getRunCounter() == (2 * WL_SAMPLES + 1) ) measurementsReady.signal();
 }
 
@@ -1609,6 +1566,7 @@ long measureHumidity()
 */
 bool measureMSOnEnable() {
   hum.initialize();
+  probePowerOn();
   return true;
 }
 
@@ -1631,7 +1589,6 @@ void measureMS() {
 
   // One second to "warm up" the probe
   if ( tMesrMoisture.isFirstIteration() ) {
-    probePowerOn();
     probeIdle.setWaiting();
     tMeasureRestart.waitFor(&probeIdle);
 
@@ -1641,11 +1598,11 @@ void measureMS() {
     return;
   }
 
-  // then 5 measuments every 200 ms to collect an average of 5
+  // then a number of measuments every 500 ms to collect an average
   if ( tMesrMoisture.getRunCounter() <= ( 2 * HUM_SAMPLES + 1) )
     currentHumidity = measureHumidity();
 
-  // on the 6th iteration signal that measurement is ready and reverese the current for 2 seconds
+  // on the last iteration signal that measurement is ready and disable itself
   if ( tMesrMoisture.getRunCounter() == ( 2 * HUM_SAMPLES + 1 ) ) {
     measurementsReady.signal();
     tMesrMoisture.disable();
@@ -2310,10 +2267,10 @@ void configurePins() {
 #endif
 
 
-//  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_GPIO15);  // Set D8 function
+  //  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_GPIO15);  // Set D8 function
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0);  // Set D3 up
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);  // Set D3 up
-  
+
   pinMode(PUMP_PWR_PIN, OUTPUT); digitalWrite(PUMP_PWR_PIN, LOW);
 
   pinMode(MOISTURE_PIN, INPUT);
@@ -2323,8 +2280,8 @@ void configurePins() {
   pinMode(RGBLED_GREEN_PIN, OUTPUT); digitalWrite(RGBLED_GREEN_PIN, LOW);
   pinMode(RGBLED_BLUE_PIN, OUTPUT); digitalWrite(RGBLED_BLUE_PIN, LOW);
 
-  pinMode(SR04_ECHO_PIN, INPUT);
-  pinMode(SR04_TRIGGER_PIN, OUTPUT); digitalWrite(SR04_TRIGGER_PIN, LOW);
+  //  pinMode(SR04_ECHO_PIN, INPUT);
+  //  pinMode(SR04_TRIGGER_PIN, OUTPUT); digitalWrite(SR04_TRIGGER_PIN, LOW);
 
   pinMode(LEAK_PIN, OUTPUT); digitalWrite(LEAK_PIN, LOW);
 }
@@ -2578,6 +2535,59 @@ bool httpRequest(const String & method,
   return true;
 }
 #endif
+
+
+void iot_started() {
+
+  if ( connectedToAP ) {
+#ifdef _IOT_BLYNK_
+
+    // local ip: 123.123.123.123 at 12:34 12/19
+    // 1234567890123456789012345678901234567890
+    char buf[41];
+    DateTime tnow = myTZ.toLocal( now() );
+
+    snprintf( buf, 40, "local ip %s at %02d:%02d %02d/%02d", WiFi.localIP().toString().c_str(), tnow.hour(), tnow.minute(), tnow.month(), tnow.day() );
+    String putData = String("[\"") + String(buf) + "\"]";
+    String response;
+    if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
+      if (response.length() != 0) {
+
+#ifdef _DEBUG_
+        Serial.print("WARNING: ");
+        Serial.println(response);
+#endif
+      }
+    }
+#endif
+  }
+}
+
+void iot_sleep() {
+
+  if ( connectedToAP ) {
+#ifdef _IOT_BLYNK_
+
+    // ip: 123.123.123.123 at 12:34 12/19
+    // 1234567890123456789012345678901234
+    char buf[41];
+    DateTime tnow = myTZ.toLocal( now() );
+
+    snprintf( buf, 40, "PowerSave mode at %02d:%02d %02d/%02d", tnow.hour(), tnow.minute(), tnow.month(), tnow.day() );
+    String putData = String("[\"") + String(buf) + "\"]";
+    String response;
+    if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
+      if (response.length() != 0) {
+
+#ifdef _DEBUG_
+        Serial.print("WARNING: ");
+        Serial.println(response);
+#endif
+      }
+    }
+#endif
+  }
+}
 
 void iot_report() {
 
