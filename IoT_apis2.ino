@@ -25,15 +25,15 @@
 
   2016-12-21:
     v1.0.2 - TaskScheduler 2.2.1 yieldOnce
-           - Make first ticker period all online for configuration purposes
+           - For PowerSave mode: allow 10 minutes for configuration after cold boot
            - Log data to a tab separated datafile as well as to IoT
 
   ----------------------------------------*/
 
 // TEST/DEBUG defines
 // ------------------
-#define _DEBUG_
-#define _TEST_
+//#define _DEBUG_
+//#define _TEST_
 
 // IoT framework selection
 // -----------------------
@@ -198,6 +198,7 @@ int   currentWaterLevel = 200;
 
 const char* CWakeReasonSleep = "Deep-Sleep Wake";
 const char* CWakeReasonReset = "External System";
+bool        coldBoot;
 
 // Forward definition of all callback methods is now required as of v1.6.6
 // ---------------------------------------------------------------------
@@ -1289,7 +1290,8 @@ void ticker() {
   }
 
   if ( parameters.powersave ) {
-    tSleep.waitForDelayed( &wateringDone, (tTicker.getRunCounter() == 1) ? CONFIG_DELAY : SLEEP_TOUT, TASK_ONCE );
+    tSleep.waitForDelayed( &wateringDone, coldBoot ? CONFIG_DELAY : SLEEP_TOUT, TASK_ONCE );
+    coldBoot = false;
   }
 }
 
@@ -1517,6 +1519,9 @@ void sleepCallback() {
   if ( tdesired > tnow ) {
     saveTimeToRTC( tdesired );
 
+    unsigned long delta = tdesired - tnow;
+    if ( delta < ticker/2 ) delta += ticker;
+
     ts.disableAll();
     WiFi.disconnect();
     SPIFFS.end();
@@ -1528,7 +1533,6 @@ void sleepCallback() {
     Serial.print(F("Tick epoch time:")); Serial.println(tickTime);
     Serial.print(F("Now  epoch time:")); Serial.println(tnow);
     Serial.print(F("ticket interval:")); Serial.println(ticker);
-    unsigned long delta = tdesired - tnow;
     Serial.print(F("sleep interval:")); Serial.println(delta);
 
     Serial.flush();
@@ -1540,7 +1544,7 @@ void sleepCallback() {
     // tick                tnow                                       tick+interval
     // <--- tnow - tick --> <               tick+interval
     time_restore.sleep_mult = 0; // no additional sleep
-    ESP.deepSleep( ( tdesired - tnow ) * 1000000UL, RF_NO_CAL );
+    ESP.deepSleep( delta * 1000000UL, RF_NO_CAL );
     delay(100);
   }
   else {
@@ -2469,6 +2473,7 @@ void setup() {
   hum.initialize();
 
   hasNtp = false;
+  coldBoot = true;
   if ( ESP.getResetReason() != CWakeReasonReset ) {
     byte *p = (byte *) &time_restore;
     if ( ESP.rtcUserMemoryRead( 64, (uint32_t*) p, sizeof(TTimeStored) )) {
@@ -2482,6 +2487,8 @@ void setup() {
 #endif
 
       if ( time_restore.magic == MAGIC_NUMBER && time_restore.ccode == ~(MAGIC_NUMBER) ) {
+        coldBoot = false;
+        
         doSetTime(time_restore.ttime + WAKE_DELAY);
         hasNtp = time_restore.hasntp;
 
