@@ -27,6 +27,13 @@
     v1.0.2 - TaskScheduler 2.2.1 yieldOnce
            - For PowerSave mode: allow 10 minutes for configuration after cold boot
            - Log data to a tab separated datafile as well as to IoT
+		       - Round next wake up time to the ticker period, so wake ups happen on an hour/half hour/10 min, etc.
+		       - Various minor bug fixes
+
+  2017-01-05:
+    v1.0.3 - Periodic connection status checking (not sure if that is needed, but don't trust events 100% for now)
+           - Periodic IoT reporting even when online
+           - Reset if IoT reporting fails 3 times (3 x 4 individual http requests: 12 requests)
 
   ----------------------------------------*/
 
@@ -144,11 +151,11 @@
 // PINs
 // ----
 // Moisture probe analog pin
-#define MOISTURE_PIN      A0  // A0
-#define MOISTURE_PWR_PIN  D8  //13  // D7
+#define MOISTURE_PIN      A0   // ADC
+#define MOISTURE_PWR_PIN  D8
 #define SENSOR_OUT_VALUE  1000
 
-#define LEAK_PIN          D5
+#define LEAK_PIN          D5   // pin connected to the bottom tray leak sensor
 
 // RGB LED
 #define RGBLED_RED_PIN    SD3  // SD3 nodemcu pin
@@ -159,12 +166,11 @@
 #define   LEDOFF          0
 #define   LEDSTAY         (-1)
 
-// HC-SR04 ultrasound sensor
-//#define SR04_TRIGGER_PIN  D4  // D5 nodemcu pin
-#define SR04_ECHO_PIN     D3    //  nodemcu pin
+// Dexter Tech Ping ))) ultrasound sensor - three pin version
+#define SR04_ECHO_PIN     D3    //  combined trigger/echo pin
 
 // PUMP pins
-#define PUMP_PWR_PIN      D2    // D2
+#define PUMP_PWR_PIN      D2    // Pump activation pin
 
 
 // EEPROM token for parameters
@@ -192,13 +198,14 @@ int   currentHumidity = 60;
 int   currentWaterLevel = 200;
 #endif
 
-#define  SLEEP_TOUT      TASK_MINUTE
+#define  SLEEP_TOUT       TASK_MINUTE
 #define  SLEEP_TOUT_CONN (TASK_MINUTE * 3)
 #define  CONFIG_DELAY    (TASK_MINUTE * 10)
+#define  HTTP_ERRORS     12
 
 const char* CWakeReasonSleep = "Deep-Sleep Wake";
 const char* CWakeReasonReset = "External System";
-bool        coldBoot;
+bool        coldBoot;                       // a flag indicating system was hard reset as opposed to warm boot or woke up from timer
 
 // Forward definition of all callback methods is now required as of v1.6.6
 // ---------------------------------------------------------------------
@@ -239,7 +246,7 @@ void connectionEnforcer();
 
 // Task Scheduling
 // ---------------
-StatusRequest measurementsReady, probeIdle, pageLoaded, wateringDone;
+StatusRequest measurementsReady, probeIdle, pageLoaded, wateringDone, httpError;
 
 Scheduler ts;
 
@@ -272,7 +279,8 @@ Task tSleep         (&sleepCallback, &ts);
 Task tIotReport     (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
 
 Task tReset         (&resetDevice, &ts);
-Task tEnforcer      (TASK_HOUR, TASK_ONCE, &connectionEnforcer, &ts);
+Task tErrorReset    (&resetDevice, &ts);
+Task tEnforcer      (TICKER * 2, TASK_ONCE, &connectionEnforcer, &ts);
 
 
 // Parameters
@@ -315,7 +323,7 @@ typedef struct {
   unsigned long ccode;      // control code for the magic number = ~magic
   unsigned long ttime;      // unix time at the time of reset
   bool          hasntp;     // was the time ntp driven
-  int           sleep_mult; // sleep multiplyer
+  int           sleep_mult; // sleep multiplyer, not currently used
   // Total of 16 bytes
 } TTimeStored;
 
@@ -389,11 +397,6 @@ WiFiEventHandler clientDisconnectedEventHandler;
 unsigned int numClients;
 
 // Ultrasonic measurment related
-//volatile bool pulseBusy = false;
-//volatile bool pulseTimeout = false;
-//volatile unsigned long pulseStart = 0;
-//volatile unsigned long pulseStop = 0;
-//volatile bool clockStarted = false;
 unsigned long distance;
 
 // Code
@@ -521,7 +524,7 @@ void motorOn() {
 }
 
 /**
-   Turn pump of
+   Turn pump off
 */
 void motorOff() {
   motorState(false);
@@ -542,7 +545,7 @@ void probePowerOff() {
 }
 
 /**
-   Retruns TRUE if there is water in under the flower pot
+   Retruns TRUE if there is water in the tray under the flower pot
 */
 bool hasLeaked() {
 
@@ -588,10 +591,10 @@ bool isNight() {
     int wkp = parameters.wakeup;
 
 #ifdef _DEBUG_
-    Serial.print(millis());
-    Serial.print(F(": isNight. hr="));
-    Serial.println(hr);
-    //  return false;
+    //    Serial.print(millis());
+    //    Serial.print(F(": isNight. hr="));
+    //    Serial.println(hr);
+    //    //  return false;
 #endif
 
     //  Add adjusting hours to the wakeup time for Saturday and Sunday
@@ -599,10 +602,10 @@ bool isNight() {
     nightMode = ( hr >= parameters.gotosleep || hr < wkp );
 
 #ifdef _DEBUG_
-    Serial.print(F("parameters.gotosleep = ")); Serial.println(parameters.gotosleep);
-    Serial.print(F("wkp = ")); Serial.println(wkp);
-    Serial.print(F("nightMode = ")); Serial.println(nightMode);
-    //  return false;
+    //    Serial.print(F("parameters.gotosleep = ")); Serial.println(parameters.gotosleep);
+    //    Serial.print(F("wkp = ")); Serial.println(wkp);
+    //    Serial.print(F("nightMode = ")); Serial.println(nightMode);
+    //    //  return false;
 #endif
 
   }
@@ -661,11 +664,11 @@ void loadParameters() {
   Serial.print(millis());
   Serial.println(F(": loadParameters."));
 #endif
-  // Let's see if we have the defaults stored already
+  // Let's see if we have the parameters stored already
   // First lets read the token.
 
   EEPROM.get(0, parameters);
-  if (strcmp(CToken, parameters.token) != 0) {
+  if (strcmp(CToken, parameters.token) != 0) {  // tokens do not mastch - load defaults
     // Write down token and defaults
     strncpy(parameters.token, CToken, 7);
 
@@ -780,6 +783,9 @@ void cfgInit() {  // Initiate connection
     // set a connection attempts timeout
     tTimeout.set(CONNECT_TIMEOUT * TASK_SECOND, TASK_ONCE, &connectTOut);
     tTimeout.enableDelayed();
+
+    httpError.setWaiting( HTTP_ERRORS );
+    tErrorReset.waitFor( &httpError );
   }
   else {
     // Set the AP parameters and setup the AP mode
@@ -839,7 +845,7 @@ void cfgChkConnect() {  // Wait for connection to AP
       yield();
       WiFi.hostname(CHost);
       WiFi.mode(WIFI_STA);
-      yield();
+      //      WiFi.persistent (false);
       WiFi.begin(ssid.c_str(), pwd.c_str());
       yield();
     }
@@ -939,6 +945,7 @@ void cfgChkNTP() {
       }
       else {
         //      delay (100);
+        // delay commented out sincce TaskScheduler yields on every pass
       }
     }
   }
@@ -1011,9 +1018,9 @@ bool doNtpUpdateCheck() {
   //  Serial.println(F("Test case: no ntp"));
   //  return false;
 
-  Serial.println(F("Test case: trust static date"));
-  epoch = rtc.now().unixtime();
-  return true;
+  //  Serial.println(F("Test case: trust static date"));
+  //  epoch = rtc.now().unixtime();
+  //  return true;
 #endif
 
   yield();
@@ -1081,7 +1088,6 @@ void ntpUpdate() {
       doNtpUpdateInit();
     }
     if ( doNtpUpdateCheck() ) {
-      hasNtp = true;
       doSetTime(epoch);
       tNtpUpdater.disable();
       udp.stop();
@@ -1089,6 +1095,7 @@ void ntpUpdate() {
       Serial.println(F("NTP update successful"));
 #endif
       if ( !hasNtp ) tTicker.restartDelayed( TASK_SECOND * ADC_SETTLE_TOUT );
+      hasNtp = true;
     }
   }
   else {
@@ -1109,7 +1116,7 @@ void cfgSetAP() {  // Configure server
   Serial.println(F(": cfgSetAP."));
 #endif
 
-  wifi_set_phy_mode(PHY_MODE_11G);
+  //  wifi_set_phy_mode(PHY_MODE_11G);
   WiFi.setOutputPower(20.5);
   WiFi.setAutoConnect(false);
   WiFi.disconnect(true);
@@ -1124,6 +1131,7 @@ void cfgSetAP() {  // Configure server
   dnsServer.setTTL(300);
   dnsServer.setErrorReplyCode(DNSReplyCode::ServerFailure);
   dnsServer.start(LOCAL_DNS_PORT, CHost, apIP);
+  yield();
 
   // flash led blue
   rgbRed = 0; rgbGreen = LEDON; rgbBlue = LEDON;
@@ -1180,11 +1188,11 @@ void cfgFinish() {  // WiFi config successful
   Serial.println(F(": cfgFinish."));
 #endif
 
-  led();
+  led();                      // flash last status colors for 1 secons
   delay(TASK_SECOND);
   ledOff();
   delay(50);
-  led(LEDON, LEDON, LEDON);
+  led(LEDON, LEDON, LEDON);   // flash white LED indicating end of configuration
   delay(500);
   ledOff();
 
@@ -1194,7 +1202,7 @@ void cfgFinish() {  // WiFi config successful
 
   tTicker.restartDelayed( TASK_SECOND * ADC_SETTLE_TOUT );  // give watering 10 seconds stabilize ADC after LED use
 
-  iot_started();
+  iot_online();
 
 
   //  // Initiate NTP updates
@@ -1202,7 +1210,9 @@ void cfgFinish() {  // WiFi config successful
 }
 
 
-
+/**
+   Enables web server on port 80 and sets all the event handling methods
+*/
 void enableWebServer() {
 
 #ifdef _DEBUG_
@@ -1215,6 +1225,9 @@ void enableWebServer() {
   server.on("/reset", HTTP_POST, resetDevice);
   server.onNotFound(serverHandleNotFound);
 
+
+  // Code below enables browsing, uploading and downloading files to the internal filesystem.
+  // This code has been borrowed from the esp8266 examples
 
 #ifdef _DEBUG_
   // =============== FSBrowse code ====================
@@ -1258,12 +1271,16 @@ void disableWebServer () {
 /**
   THIS IS THE HEARTBEAT TASK:
   ===========================
+  Ticker periodically initiates a sequence of events for watering and iot reporting.
+
   Current sequence of events:
   1. Run measurments and water if necessary
   2. Report to IoT after watering is done or not required
   3. Update NTP time if connected
-  4. Deep sleep after a timeout if requested
+  4. Deep sleep after a timeout if requested via parameters
 */
+
+StatusRequest *networkReady;
 
 void ticker() {
 #ifdef _DEBUG_ || _TEST_
@@ -1274,23 +1291,36 @@ void ticker() {
   Serial.println();
   time_t tnow = myTZ.toLocal( now() );
   Serial.print(F("Current local time: ")); printTime(DateTime(tnow)); Serial.println();
+
+//  resetDevice();
 #endif
 
   tickTime = now();
 
+  // to-do: figure out how to disable and re-enable webserver. so far it seems it loses ability to service requests once disabled
   //  disableWebServer();
 
-  tMeasureRestart.restart();
+  tMeasureRestart.restart();            // all measurements are initiated. 'wateringDone' event will trigger once all measurements and possiobly water completes
   wateringDone.setWaiting();
-  tIotReport.waitFor( &wateringDone ); // server will restart whe IoT report is ready
+
+  // If connection was lost and onDisconnect event did not catch it, we are going to re-establish connection after watering is done
+  // to avoid impacting measurements with high power WiFi operations
+
+  networkReady = &wateringDone;
+  if ( parameters.is_ap == 0 && !runningAsAP ) {
+    tConnected.waitFor( &wateringDone, TASK_SECOND, TASK_FOREVER );
+    networkReady = tConnected.getInternalStatusRequest();
+  }
+
+  tIotReport.waitFor( networkReady );  // server will restart whe IoT report is ready
 
 
-  if ( !(tTicker.isFirstIteration() && hasNtp) ) { // Do not sleep on the first iteration letting configuration updates after reset
-    tNtpUpdater.waitFor( &wateringDone ); // update NTP
+  if ( !(tTicker.isFirstIteration() && hasNtp) ) { // No need to run another ntp update right after the first one if ntp information was obtained
+    tNtpUpdater.waitFor( networkReady ); // update NTP
   }
 
   if ( parameters.powersave ) {
-    tSleep.waitForDelayed( &wateringDone, coldBoot ? CONFIG_DELAY : SLEEP_TOUT, TASK_ONCE );
+    tSleep.waitForDelayed( networkReady, coldBoot ? CONFIG_DELAY : SLEEP_TOUT, TASK_ONCE );  // use special sleep delay on the first iteration letting time for configuration updates after reset
     coldBoot = false;
   }
 }
@@ -1326,6 +1356,7 @@ void ledOnDisable() {
   digitalWrite(RGBLED_RED_PIN, LEDOFF);
   digitalWrite(RGBLED_GREEN_PIN, LEDOFF);
   digitalWrite(RGBLED_BLUE_PIN, LEDOFF);
+  flip = false;
 }
 
 /**
@@ -1407,8 +1438,19 @@ void onDisconnected(const WiFiEventStationModeDisconnected & event) {
   Serial.print(millis());
   Serial.println(F(": onDisconnected."));
 #endif
+  if ( !wateringDone.pending() ) {
+    initiate_reconnect();
+  }
+}
 
+void initiate_reconnect() {
   if ( connectedToAP ) {
+
+#ifdef _DEBUG_
+    Serial.print(millis());
+    Serial.println(F(": initiate_reconnect."));
+#endif
+
     //    WiFi.disconnect();
     tConnected.restartDelayed(TASK_SECOND);
     connectedToAP = false;
@@ -1453,10 +1495,23 @@ void connectedChk() {
   Serial.print(millis());
   Serial.println(F(": connectedChk."));
 #endif
+  if (WiFi.status() == WL_CONNECTED) {
+    connectedToAP = true;
+    tTimeout.disable();
+    tConnected.disable();
+    tEnforcer.disable();
+#ifdef _DEBUG_
+    Serial.print(millis());
+    Serial.println(F("Successfully reconnected"));
+#endif
+    return;
+  }
 
   if ( tConnected.isFirstIteration() ) {
+    connectedToAP = false;
     WiFi.hostname(CHost);
     WiFi.mode(WIFI_STA);
+    //    WiFi.persistent (false);
     yield();
     WiFi.begin(parameters.ssid, parameters.pwd);
     yield();
@@ -1468,22 +1523,13 @@ void connectedChk() {
     tSleep.delay();
     return;
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    connectedToAP = true;
-    tTimeout.disable();
-    tConnected.disable();
-#ifdef _DEBUG_
-    Serial.print(millis());
-    Serial.println(F("Successfully reconnected"));
-#endif
-  }
 }
 
 
 /**
   Reconnection attempts timeout
-  Device will be reset in 1 hour time to re-attempt connection per config
+  Device will continue operating, but a delayed reset will be attempted
+  to reconnect according to parameters
 */
 void connectedChkTOut () {
 
@@ -1495,7 +1541,9 @@ void connectedChkTOut () {
   connectedToAP = false;
   tTimeout.disable();
   tConnected.disable();
-  tEnforcer.restartDelayed();
+  if ( !tEnforcer.isEnabled() ) {
+    tEnforcer.restartDelayed();
+  }
 }
 
 
@@ -1520,7 +1568,7 @@ void sleepCallback() {
     saveTimeToRTC( tdesired );
 
     unsigned long delta = tdesired - tnow;
-    if ( delta < ticker/2 ) delta += ticker;
+    if ( delta < ticker / 2 ) delta += ticker;
 
     ts.disableAll();
     WiFi.disconnect();
@@ -1545,7 +1593,8 @@ void sleepCallback() {
     // <--- tnow - tick --> <               tick+interval
     time_restore.sleep_mult = 0; // no additional sleep
     ESP.deepSleep( delta * 1000000UL, RF_NO_CAL );
-    delay(100);
+    yield();
+    //    delay(100);
   }
   else {
     resetDevice();
@@ -1553,7 +1602,9 @@ void sleepCallback() {
 }
 
 /**
-  Saves provided time to RTC memory
+  Saves time to RTC memory
+
+  @param: aUt UTC timestamp to be saved to RTC memory
 */
 void saveTimeToRTC (unsigned long aUt) {
   time_restore.magic = MAGIC_NUMBER;
@@ -1568,6 +1619,7 @@ void saveTimeToRTC (unsigned long aUt) {
 
 /**
   Resets the device
+  Current watering results and requested ntp time at wake up are stored
 */
 void resetDevice() {
 
@@ -1634,6 +1686,7 @@ bool measureWLOnEnable() {
   wl.initialize();
   return true;
 }
+
 /**
   Initiate water level measurement with a timeout of 4 milliseconds (or ~ XX cm)
   Allows collection of minimal necessary samples to properly average the waterlevel
@@ -1651,8 +1704,6 @@ void measureWL() {
   //  tWaterLevel.waitFor( tPing.getInternalStatusRequest() );
   if (tMesrLevel.getRunCounter() == (2 * WL_SAMPLES + 1) ) measurementsReady.signal();
 }
-
-
 
 /**
   Measured current humidity based on the ADC reading and updates the average filtered value
@@ -1697,7 +1748,6 @@ bool measureMSOnEnable() {
   return true;
 }
 
-
 /**
   When Soil humidity measurement finishes, turns off power on the humidity probe, signals that probe is idle and disables water level measurement
 */
@@ -1720,7 +1770,7 @@ void measureMS() {
     tMeasureRestart.waitFor(&probeIdle);
 
     //    hum.initialize();
-    tMesrMoisture.setInterval( TASK_SECOND / 2 );
+    tMesrMoisture.setInterval( TASK_SECOND / 2 );     // set measurement interval at half a second
     tMesrMoisture.delay( TASK_SECOND );
     return;
   }
@@ -1782,7 +1832,7 @@ void measureCallback() {
 /**
   Measurement restart method
   Restarts measurements when previous measurements are ready
-  Since pump run draws current, it may affect accuracy of the soil humidity measurement,
+  Since pump every pump run draws current, it may affect accuracy of the soil humidity measurement,
   therefore no measurements takes place during the actual watering run when pump is active
 */
 void measureRestart() {
@@ -1891,6 +1941,10 @@ void waterOnDisable() {
 
 // SERVER CODE
 // ===========
+
+/**
+   Part of the wifiwebserver code - handles client connections and requests
+*/
 void handleClientCallback() {
 
 #ifdef _DEBUG_
@@ -1911,6 +1965,9 @@ void handleClientCallback() {
 int indexParser (int aTag, char* buf, int len);
 void parseFile( char* aFileName, int (*aParser)(int aTag, char* aBuffer, int aSize) );
 
+/**
+   Hanles request for the webserver root folder
+*/
 void serverHandleRoot() {
 
 #ifdef _DEBUG_
@@ -1933,6 +1990,13 @@ void serverHandleRoot() {
   ledOff();
 }
 
+
+/**
+   Parses html file using designated parser routine
+   The parser routine is looking for a specially formatted html comment: "<!-- ###NNNN-name###-->
+   Parser replaces the line next to the tag with appropriate html stream and returns
+   number of lines of the HTML file to skip as a results
+*/
 const char* CReplaceTag = "<!-- ###"; //
 const int   CRLen = 8;
 
@@ -1956,7 +2020,7 @@ void parseFile( char* aFileName, int(*aParser)(int aTag, char* aBuffer, int aSiz
       if ( ( len = file.readBytesUntil('\n', buf, BUFFER_SIZE) ) ) {
         buf[len] = 0;
 
-        if ( skipNext > 0 ) {
+        if ( skipNext > 0 ) {   // this is where we skip the original html lines as instructed by the parser
           skipNext--;
           continue;
         }
@@ -1970,7 +2034,7 @@ void parseFile( char* aFileName, int(*aParser)(int aTag, char* aBuffer, int aSiz
 
         // Tag is: |<!-- ###0001-blah blah blah|
         //          0123456789012345
-        if ( strncmp(CReplaceTag, buf, CRLen) == 0 ) {
+        if ( strncmp(CReplaceTag, buf, CRLen) == 0 ) {            // found special tag - let's identify tag number (always 4 characters)
 
 #ifdef _DEBUG_
           //          Serial.println(F("Found the '<!-- ###' tag."));
@@ -1980,7 +2044,7 @@ void parseFile( char* aFileName, int(*aParser)(int aTag, char* aBuffer, int aSiz
           //          Serial.println(buf);
 #endif
 
-          buf[CRLen + 4] = 0;
+          buf[CRLen + 4] = 0;                                     // tag id number should always be 4 characters
           int tag = String(&buf[CRLen]).toInt();
 
 #ifdef _DEBUG_
@@ -2004,7 +2068,9 @@ void parseFile( char* aFileName, int(*aParser)(int aTag, char* aBuffer, int aSiz
   }
 }
 
-
+/**
+   Parser for index.htm file
+*/
 int indexParser (int aTag, char* buf, int len) {
   time_t tnow;
 
@@ -2125,6 +2191,9 @@ int indexParser (int aTag, char* buf, int len) {
   return 1;
 }
 
+/**
+   Parser for water parameters page
+*/
 const char *CHtmlInputText = "<input type=\"text\" value=\"%d\"";
 int waterParser (int aTag, char* buf, int len) {
   time_t tnow;
@@ -2182,6 +2251,9 @@ int waterParser (int aTag, char* buf, int len) {
   return 1;
 }
 
+/**
+   Parser for network parameters page
+*/
 int networkParser (int aTag, char* buf, int len) {
   time_t tnow;
   String s;
@@ -2246,7 +2318,10 @@ int networkParser (int aTag, char* buf, int len) {
   return 1;
 }
 
-
+/**
+   Handler for all requests without dedicated event handlers
+   Regular file streaming (images) is supported via this method
+*/
 void serverHandleNotFound() {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -2277,6 +2352,9 @@ void serverHandleNotFound() {
   ledOff();
 }
 
+/**
+   Read file from the filesystem
+*/
 bool handleFileRead(String path) {
 
   String contentType = getContentType(path);
@@ -2301,12 +2379,21 @@ bool handleFileRead(String path) {
   return result;
 }
 
+/**
+   Copy parameters
+
+   @param s: pointer to the spource parameter structure
+   @param d: pointer to the destination parameter structure
+*/
 void cpParams( byte * s, byte * d ) {
   for (int i = 0; i < sizeof(TParameters); i++, s++, d++) {
     *d = *s;
   }
 }
 
+/**
+   Handle updates to the3 network configuration
+*/
 const char* CSaved = "<html><head></head><body><script>window.alert(\"Parameters saved\");window.location.href='/index.htm';</script></body></html>";
 const char* CRestart = "<html><head></head><body><script>window.alert(\"Parameters saved\");window.location.href='/confrestart.htm';</script></body></html>";
 void handleConfnetworksave() {
@@ -2351,7 +2438,9 @@ void handleConfnetworksave() {
   ledOff();
 }
 
-
+/**
+   Handle updates to watering parameters
+*/
 void handleConfwatersave() {
 #ifdef _DEBUG_
   Serial.print(millis());
@@ -2403,6 +2492,10 @@ void handleConfwatersave() {
   ledOff();
 }
 
+
+/**
+   Identify correct content type by file extension
+*/
 String getContentType(String filename) {
   if (server.hasArg("download")) return "application/octet-stream";
   else if (filename.endsWith(".htm")) return "text/html";
@@ -2425,6 +2518,9 @@ String getContentType(String filename) {
 // Startup code
 // ============
 
+/**
+   Configure pins INPUT and OUTPUT appropriately
+*/
 void configurePins() {
 #ifdef _DEBUG_
   //  Serial.print(millis());
@@ -2432,9 +2528,8 @@ void configurePins() {
   //  Serial.flush();
 #endif
 
-
-  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0);  // Set D3 up
-  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);  // Set D3 up
+  //  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0);  // Set D3 up
+  //  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);  // Set D4 up
 
   pinMode(PUMP_PWR_PIN, OUTPUT); digitalWrite(PUMP_PWR_PIN, LOW);
 
@@ -2488,7 +2583,7 @@ void setup() {
 
       if ( time_restore.magic == MAGIC_NUMBER && time_restore.ccode == ~(MAGIC_NUMBER) ) {
         coldBoot = false;
-        
+
         doSetTime(time_restore.ttime + WAKE_DELAY);
         hasNtp = time_restore.hasntp;
 
@@ -2532,6 +2627,7 @@ void setup() {
     ledOff(); delay(500);
   }
 
+  // Indicate TEST mode by lighting upu LED pure white for 5 seconds
 #ifdef _TEST_ || _DEBUG_
   led(LEDON, LEDON, LEDON);
   Serial.println(F("_TEST_ or _DEBUG_ - lights out"));
@@ -2630,21 +2726,25 @@ void handleFileUpload() {
 }
 
 #endif
-
+//==========================================================================
 
 
 
 
 #ifdef _IOT_BLYNK_
 
+//  IoT Blynk specific http aREST code
+
 #ifdef _DEBUG_ || _TEST_
 const char blynk_auth[] = "ecaf415310ba40648092da105b1ee22c";
+const char* blynk_host = "blynk-cloud.com";
+unsigned int blynk_port = 8080;  // to test error handdling
 #else
 const char blynk_auth[] = "9955f87265f04846a680753c5d787fd0";
-#endif
-
 const char* blynk_host = "blynk-cloud.com";
 unsigned int blynk_port = 8080;
+#endif
+
 WiFiClient blynk_client;
 
 bool httpRequest(const String & method,
@@ -2659,13 +2759,19 @@ bool httpRequest(const String & method,
   Serial.print("... ");
 #endif
   if (blynk_client.connect(blynk_host, blynk_port)) {
+
 #ifdef _DEBUG_
     Serial.println("OK");
 #endif
+
+    httpError.setWaiting( HTTP_ERRORS );
   } else {
+
 #ifdef _DEBUG_
     Serial.println("failed");
 #endif
+
+    httpError.signal();
     return false;
   }
 
@@ -2720,35 +2826,71 @@ bool httpRequest(const String & method,
 }
 #endif
 
+/**
+   Report successful connection to WiFi
+*/
+void iot_online() {
 
-void iot_started() {
+  String st = "Online " + WiFi.localIP().toString();
+  iot_status_update ( st );
 
-  if ( connectedToAP ) {
-#ifdef _IOT_BLYNK_
-
-    // local ip: 123.123.123.123 at 12:34 12/19
-    // 1234567890123456789012345678901234567890
-    char buf[41];
-    DateTime tnow = myTZ.toLocal( now() );
-
-    snprintf( buf, 40, "local ip %s at %02d:%02d %02d/%02d", WiFi.localIP().toString().c_str(), tnow.hour(), tnow.minute(), tnow.month(), tnow.day() );
-    String putData = String("[\"") + String(buf) + "\"]";
-    String response;
-    if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
-      if (response.length() != 0) {
-
-#ifdef _DEBUG_
-        Serial.print("WARNING: ");
-        Serial.println(response);
-#endif
-      }
-    }
-#endif
-  }
+  //  if ( connectedToAP ) {
+  //#ifdef _IOT_BLYNK_
+  //
+  //    // local ip: 123.123.123.123 at 12:34 12/19
+  //    // 1234567890123456789012345678901234567890
+  //    char buf[41];
+  //    DateTime tnow = myTZ.toLocal( now() );
+  //
+  //    snprintf( buf, 40, "local ip %s at %02d:%02d %02d/%02d", WiFi.localIP().toString().c_str(), tnow.hour(), tnow.minute(), tnow.month(), tnow.day() );
+  //    String putData = String("[\"") + String(buf) + "\"]";
+  //    String response;
+  //    if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
+  //      if (response.length() != 0) {
+  //
+  //#ifdef _DEBUG_
+  //        Serial.print("WARNING: ");
+  //        Serial.println(response);
+  //#endif
+  //      }
+  //    }
+  //#endif
+  //  }
 }
 
+/**
+   Report entering sleep mode
+*/
 void iot_sleep() {
 
+  String st = "PowerSave mode";
+  iot_status_update ( st );
+
+  //  if ( connectedToAP ) {
+  //#ifdef _IOT_BLYNK_
+  //
+  //    // ip: 123.123.123.123 at 12:34 12/19
+  //    // 1234567890123456789012345678901234
+  //    char buf[41];
+  //    DateTime tnow = myTZ.toLocal( now() );
+  //
+  //    snprintf( buf, 40, "PowerSave mode at %02d:%02d %02d/%02d", tnow.hour(), tnow.minute(), tnow.month(), tnow.day() );
+  //    String putData = String("[\"") + String(buf) + "\"]";
+  //    String response;
+  //    if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
+  //      if (response.length() != 0) {
+  //
+  //#ifdef _DEBUG_
+  //        Serial.print("WARNING: ");
+  //        Serial.println(response);
+  //#endif
+  //      }
+  //    }
+  //#endif
+  //  }
+}
+
+void iot_status_update( String& aStatus) {
   if ( connectedToAP ) {
 #ifdef _IOT_BLYNK_
 
@@ -2757,7 +2899,7 @@ void iot_sleep() {
     char buf[41];
     DateTime tnow = myTZ.toLocal( now() );
 
-    snprintf( buf, 40, "PowerSave mode at %02d:%02d %02d/%02d", tnow.hour(), tnow.minute(), tnow.month(), tnow.day() );
+    snprintf( buf, 40, "%s at %02d:%02d %02d/%02d", aStatus.c_str(), tnow.hour(), tnow.minute(), tnow.month(), tnow.day() );
     String putData = String("[\"") + String(buf) + "\"]";
     String response;
     if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
@@ -2773,11 +2915,16 @@ void iot_sleep() {
   }
 }
 
+/**
+   Report current humidity and water level
+*/
 void iot_report() {
 
   //  enableWebServer();
   if ( connectedToAP ) {
 #ifdef _IOT_BLYNK_
+
+    iot_online();
 
     String putData = String("[\"") + currentHumidity + "\"]";
     String response;
@@ -2803,16 +2950,16 @@ void iot_report() {
       }
     }
 
-    //  putData = String("[\"") + currentHumidity + "\"]";
-    //  if (httpRequest(String("PUT /") + blynk_auth + "/update/V2", putData, response)) {
-    //    if (response.length() != 0) {
-    //
-    //#ifdef _DEBUG_
-    //      Serial.print("WARNING: ");
-    //      Serial.println(response);
-    //#endif
-    //    }
-    //  }
+    putData = String("[\"") + (hasLeaked() ? "255" : "0") + "\"]";
+    if (httpRequest(String("PUT /") + blynk_auth + "/update/V3", putData, response)) {
+      if (response.length() != 0) {
+
+#ifdef _DEBUG_
+        Serial.print("WARNING: ");
+        Serial.println(response);
+#endif
+      }
+    }
 #endif
   }
 }
