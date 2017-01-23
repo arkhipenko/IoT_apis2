@@ -1,8 +1,8 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.0.2
-   Parameters Version 01
+   Code Version 1.0.5
+   Parameters Version 02
 
   Change Log:
   2016-11-29
@@ -38,13 +38,16 @@
   2017-01-06:
     v1.0.4 - feature: Internal RTC precision compensation
            - bug: Prevent any LEDs in night mode
-           
+
+  2017-01-21:
+    v1.0.5 - programming: hide WiFi settings in the header file outside of github (for publishing)
+
   ----------------------------------------*/
 
 // TEST/DEBUG defines
 // ------------------
-//#define _DEBUG_
-//#define _TEST_
+#define _DEBUG_
+#define _TEST_
 
 // IoT framework selection
 // -----------------------
@@ -77,6 +80,8 @@
 #include <DNSServer.h>
 #include <FS.h>
 
+#include <IoT_APIS_WiFi.h>
+
 
 // DEFINES AND GLOBAL VARIABLES
 // ============================
@@ -103,7 +108,7 @@
   Comparing epoch times between internal RTC and external RTC after 10 minute deep sleep
   Internal RTC:1483693345
   External RTC:1483693318
-  Internal RTC is *ahead* meaning that the device will wake up *earlier* than necessary, 
+  Internal RTC is *ahead* meaning that the device will wake up *earlier* than necessary,
   so we need to *add* time to sleep request to compensate
   (Internal - External)/10 min = 27 sec / 600 sec = 0.045 seconds/second or 45000 uSec/sec of sleep
 */
@@ -156,7 +161,7 @@
 // Wifi
 // ----
 #define CONNECT_TIMEOUT 30    //seconds
-#define NTP_TIMEOUT     20    //seconds
+#define NTP_TIMEOUT     30    //seconds
 #define CONNECT_BLINK   260   // ms
 #define WL_PERIOD       100   // ms
 
@@ -193,24 +198,24 @@
 #ifdef _TEST_
 const char *CToken =  "APIS00\0"; // Eeprom token: Automatic Plant Irrigation System (for testing)
 #else
-const char *CToken =  "APIS01\0"; // Eeprom token: Automatic Plant Irrigation System
+const char *CToken =  "APIS02\0"; // Eeprom token: Automatic Plant Irrigation System
 #endif
-const char *CSsid  =  "wifi_network";
-const char *CPwd   =  "wifi_password";
+//const char *CSsid  =  "wifi_network";
+//const char *CPwd   =  "wifi_password";
 const char *CDSsid  = "Plant_";
 const char *CDPwd   = "changeme!";
 const char *CHost  =  "plant.io";
 String ssid, pwd;
 
 #ifndef _TEST_          // "Real" parameters
-#define  TICKER          (TASK_MINUTE * 30) // probe soil humidity every 30 minutes
+#define  TICKER          30                 // probe soil humidity every 30 minutes
 
 int   currentHumidity = 0;                  // current humidity level
 int   currentWaterLevel = 0;                // current water level in the bucket
-  
+
 #else                   // "Test" parameters
 
-#define  TICKER          (TASK_MINUTE * 5)  // in test mose probe every 5 minutes
+#define  TICKER          5                  // in test mose probe every 5 minutes
 
 int   currentHumidity = 60;
 int   currentWaterLevel = 200;
@@ -221,7 +226,7 @@ int   currentWaterLevel = 200;
 #define  CONFIG_DELAY    (TASK_MINUTE * 10) // in powersave mode: initial delay to allow parameter configuration (after first power on)
 #define  HTTP_ERRORS     12                 // reset the device if this many http errors were detected sequentially (resets every time http is successful)
 
-const char* CWakeReasonSleep = "Deep-Sleep Wake";   // reason code for device wake up 
+const char* CWakeReasonSleep = "Deep-Sleep Wake";   // reason code for device wake up
 const char* CWakeReasonReset = "External System";   // reason code for device cold reset
 bool        coldBoot;                               // a flag indicating system was hard reset as opposed to warm boot or woke up from timer
 
@@ -256,6 +261,7 @@ void serverHandleRoot();
 void serverHandleNotFound();
 
 void sleepCallback();
+void postWaterCallback();
 
 void resetDevice();
 void iot_report();
@@ -264,17 +270,17 @@ void connectionEnforcer();
 
 // Task Scheduling
 // ---------------
-StatusRequest measurementsReady;    // event siganlling that all measurements (soil and water level) are done and values are ready
-StatusRequest probeIdle;            // event siganlling that the humidity probe is idle (not under vaoltage)
-StatusRequest pageLoaded;           // event signalling comloetion of the html page load (to reset after the reset picture fully loads)
+StatusRequest measurementsReady;    // event signalling that all measurements (soil and water level) are done and values are ready
+StatusRequest probeIdle;            // event signalling that the humidity probe is idle (not under voltage)
+StatusRequest pageLoaded;           // event signalling completion of the html page load (to reset after the reset picture fully loads)
 StatusRequest wateringDone;         // event signalling watering procedure has completed
-StatusRequest httpError;            // event counting the number of http errors - to reset device if too many errors occured 
+StatusRequest httpError;            // event counting the number of http put errors - to reset device if too many errors occured
 
 Scheduler ts;                       // TaskScheduler scheduler object
 
 #ifdef _TEST_
 void testTicker();
-Task tTest          (TASK_MINUTE, TASK_FOREVER, &testTicker, &ts, true);  // Test task displaying information to the Serial monitor 
+Task tTest          (TASK_MINUTE, TASK_FOREVER, &testTicker, &ts, true);  // Test task displaying information to the Serial monitor
 #endif
 
 
@@ -282,14 +288,15 @@ Task tConfigure     (TASK_IMMEDIATE, TASK_ONCE, &cfgInit, &ts, true);
 Task tLedBlink      (TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ts, false, &ledOnEnable, &ledOnDisable);
 Task tTimeout       (TASK_IMMEDIATE, TASK_FOREVER, NULL, &ts);
 Task tNtpUpdater    (NTPUPDT_INTRVL, NTP_TIMEOUT, &ntpUpdate, &ts);
-Task tConnected     (TASK_SECOND, TASK_FOREVER, &connectedChk, &ts);
+Task tConnected     (TASK_SECOND, CONNECT_TIMEOUT, &connectedChk, &ts);
 
 Task tHandleClients (TASK_SECOND, TASK_FOREVER, &handleClientCallback, &ts);
 
-Task tTicker        (TICKER, TASK_FOREVER, &ticker, &ts);
+Task tTicker        (TICKER * TASK_MINUTE, TASK_FOREVER, &ticker, &ts);
 
 Task tMeasure       (&measureCallback, &ts);
 Task tMeasureRestart(&measureRestart, &ts);
+Task tPostWater     (&postWaterCallback, &ts);
 
 Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false, &measureWLOnEnable, NULL);
 Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, &measureMSOnEnable, &measureMSOnDisable);
@@ -302,7 +309,7 @@ Task tIotReport     (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
 
 Task tReset         (&resetDevice, &ts);
 Task tErrorReset    (&resetDevice, &ts);
-Task tEnforcer      (TICKER * 2, TASK_ONCE, &connectionEnforcer, &ts);
+Task tEnforcer      (TICKER * 2 * TASK_MINUTE, TASK_ONCE, &connectionEnforcer, &ts);
 
 
 // Parameters
@@ -312,30 +319,36 @@ typedef struct {
   char      token[7];   //  6 digit token = APISxx, where xx is a version + '\0'
 
   // watering parameters
-  byte      high;       //  high humidity mark - stop watering
-  byte      low;        //  low humidity mark - start watering
-  byte      retries;    //  number of watering runs before give up (if high not reached)
-  byte      watertime;  //  pumping duration
-  byte      saturate;   //  saturation duration
-  byte      gotosleep;  //  hour to go goodnight (e.g., 22)
-  byte      wakeup;     //  hour to wake up (e.g., 08)
-  byte      wkendadj;   //  weekend wake up adjustment time
-  int       wl_depth;   //  water container depth (empty), in mm
-  int       wl_low;     //  water container level low mark, in mm
+  byte      high;           //  high humidity mark - stop watering
+  byte      low;            //  low humidity mark - start watering
+  byte      retries;        //  number of watering runs before give up (if high not reached)
+  byte      watertime;      //  pumping duration
+  byte      saturate;       //  saturation duration
+  byte      gotosleep;      //  hour to go goodnight (e.g., 22)
+  byte      wakeup;         //  hour to wake up (e.g., 08)
+  byte      wkendadj;       //  weekend wake up adjustment time
+  int       wl_depth;       //  water container depth (empty), in mm
+  int       wl_low;         //  water container level low mark, in mm
   //  12 bytes
 
   // wifi parameters
-  byte      is_ap;      //  is this system configured to be an access point or connect to a network
-  char      ssid[32];   //  SSID of the network to connect to -OR- SSID of the AP to create
-  char      pwd[65];    //  Password for the network to be connected to -OR- AP password
-  char      ssid_ap[32];//  SSID of the network to connect to -OR- SSID of the AP to create
-  char      pwd_ap[65]; //  Password for the network to be connected to -OR- AP password
+  byte      is_ap;          //  is this system configured to be an access point or connect to a network
+  char      ssid[32];       //  SSID of the network to connect to -OR- SSID of the AP to create
+  char      pwd[65];        //  Password for the network to be connected to -OR- AP password
+  char      ssid_ap[32];    //  SSID of the network to connect to -OR- SSID of the AP to create
+  char      pwd_ap[65];     //  Password for the network to be connected to -OR- AP password
   // 195 bytes
 
   // power parameters
-  bool      powersave;  //  false: run continuosly, true: run in a power saving mode
+  bool      powersave;      // false: run continuosly, true: run in a power saving mode
   // 2 bytes
-  // total of 209 bytes
+
+  // other parameters
+  int       ping_interval;  // soil humidity check interval, minutes
+  byte      led_use;        // LED use option: 0 - depending on night mode, 1 - always, 2 - never
+  char      ntp_server[32]; // hostname of the ntp server
+  // 35 bytes
+  // total of 246 bytes
 } TParameters;
 
 TParameters parameters;
@@ -410,7 +423,7 @@ bool connectedToAP = false;                         // if connected to AP, presu
 bool runningAsAP   = false;                         // running as AP, internet is not available, no correct time is available
 bool hasNtp;                                        // Indicates that device was able to update time from NTP servers at some point
 
-// WiFi specific events 
+// WiFi specific events
 WiFiEventHandler disconnectedEventHandler;
 WiFiEventHandler clientConnectedEventHandler;
 WiFiEventHandler clientDisconnectedEventHandler;
@@ -632,6 +645,18 @@ bool isNight() {
   return nightMode;
 }
 
+/**
+   Determines if and how the LEDs should be used
+*/
+bool useLed() {
+
+  if ( parameters.led_use == 0 ) return nightMode;  // 0 - depending on Night Mode
+  else if ( parameters.led_use == 1 ) return false; // 1 - always
+
+  return true;
+}
+
+
 // 3 Color LED methods
 // -------------------
 
@@ -652,7 +677,7 @@ void led(int aR = LEDSTAY, int aG = LEDSTAY, int aB = LEDSTAY) {
   if (rgbGreen < 0) rgbGreen = LEDOFF; if (rgbGreen > LEDON) rgbGreen = LEDON;
   if (rgbBlue < 0) rgbBlue = LEDOFF; if (rgbBlue > LEDON) rgbBlue = LEDON;
 
-  if ( nightMode ) {
+  if ( useLed() ) {
     digitalWrite(RGBLED_RED_PIN, LEDOFF);
     digitalWrite(RGBLED_GREEN_PIN, LEDOFF);
     digitalWrite(RGBLED_BLUE_PIN, LEDOFF);
@@ -701,7 +726,7 @@ void loadParameters() {
     parameters.wakeup = (byte) WAKEUP;
     parameters.wkendadj = (byte) WEEKENDADJ;
     parameters.wl_depth = (int) WLDEPTH;
-    parameters.wl_low = (int) WLLOW; 
+    parameters.wl_low = (int) WLLOW;
 
     parameters.is_ap = 0;                           // not an Access Point
     //    parameters.is_ap = 1;                     // Access Point
@@ -712,6 +737,10 @@ void loadParameters() {
     strncpy(parameters.pwd_ap, CDPwd, 65);
 
     parameters.powersave = false;
+
+    parameters.ping_interval = TICKER;
+    parameters.led_use = 0;
+    strncpy(parameters.ntp_server, ntpServerName, 32);
 
     saveParameters();
   }
@@ -741,6 +770,9 @@ void saveParameters() {
   Serial.print(F("AP SSID: ")); Serial.println(parameters.ssid_ap);
   Serial.print(F("AP PWD: ")); Serial.println(parameters.pwd_ap);
   Serial.print(F("PWRSave: ")); Serial.println(parameters.powersave);
+  Serial.print(F("Ping Interval: ")); Serial.println(parameters.ping_interval);
+  Serial.print(F("Use LED: ")); Serial.println(parameters.led_use);
+  Serial.print(F("NTP Server: ")); Serial.println(parameters.ntp_server);
 #endif
 
   EEPROM.put(0, parameters);
@@ -781,12 +813,7 @@ void cfgInit() {  // Initiate connection
 
   if (parameters.is_ap == 0) { // If not explicitly requested to be an Access Point
     // attempt to connect to an exiting AP
-    WiFi.mode(WIFI_STA);
-    //    WiFi.persistent (false);
-    WiFi.hostname(CHost);
-    yield();
-    WiFi.begin(ssid.c_str(), pwd.c_str());
-    yield();
+    initiate_wifi_connection();
 
     // flash led green
     rgbRed = 0; rgbGreen = LEDON; rgbBlue = 0;
@@ -812,6 +839,18 @@ void cfgInit() {  // Initiate connection
     pwd = parameters.pwd_ap;
     tConfigure.yield(&cfgSetAP);
   }
+}
+
+/**
+   Initial WIFI connection to the AP
+*/
+void initiate_wifi_connection() {
+  WiFi.hostname( CHost );
+  WiFi.mode( WIFI_STA );
+  WiFi.persistent ( true );
+  //  yield();
+  WiFi.begin( ssid.c_str(), pwd.c_str() );
+  yield();
 }
 
 /**
@@ -850,7 +889,8 @@ void cfgChkConnect() {  // Wait for connection to AP
     tTimeout.enableDelayed();
   }
   else {
-    delay(100);
+    //    delay(100);
+    //    yield();
     if (tConfigure.getRunCounter() % 5 == 0) {
 
 #ifdef _DEBUG_
@@ -860,13 +900,9 @@ void cfgChkConnect() {  // Wait for connection to AP
       //      wifi_set_phy_mode(PHY_MODE_11G);
       //      WiFi.setOutputPower(20.5);
       //      WiFi.setAutoConnect(false);
-      WiFi.disconnect(true);
+      WiFi.disconnect();
       yield();
-      WiFi.hostname(CHost);
-      WiFi.mode(WIFI_STA);
-      //      WiFi.persistent (false);
-      WiFi.begin(ssid.c_str(), pwd.c_str());
-      yield();
+      initiate_wifi_connection();
     }
   }
 }
@@ -884,7 +920,7 @@ void doNtpUpdateInit() {
   if ( connectedToAP ) {  // only if connected to wifi network
     // request NTP update
     udp.begin(LOCAL_NTP_PORT);
-    if ( WiFi.hostByName(ntpServerName, timeServerIP) ) { //get a random server from the pool
+    if ( WiFi.hostByName(parameters.ntp_server, timeServerIP) ) { //get a random server from the pool
 
 #ifdef _DEBUG_
       Serial.print(F("timeServerIP = "));
@@ -1130,18 +1166,18 @@ void ntpUpdate() {
    Initiate configuration of the device as Soft Access Point
 */
 bool globRet;       // Global return code variable
-void cfgSetAP() {   // Configure as an Access Point 
+void cfgSetAP() {   // Configure as an Access Point
 
 #ifdef _DEBUG_
   Serial.print(millis());
   Serial.println(F(": cfgSetAP."));
 #endif
 
-  //  wifi_set_phy_mode(PHY_MODE_11G);
-  WiFi.setOutputPower(20.5);
-  WiFi.setAutoConnect(false);
-  WiFi.disconnect(true);
+  WiFi.disconnect();
   yield();
+  wifi_set_phy_mode(PHY_MODE_11G);
+  WiFi.setOutputPower(20.5);
+  //  WiFi.setAutoConnect(false);
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   if ( pwd.length() == 0 )
@@ -1221,9 +1257,11 @@ void cfgFinish() {  // WiFi config successful
 
   enableWebServer();
 
+  // Set ticker task according to the parameters interval
+  tTicker.setInterval( parameters.ping_interval * TASK_MINUTE );
   tTicker.restartDelayed( TASK_SECOND * ADC_SETTLE_TOUT );  // give watering 10 seconds stabilize ADC after LED use
 
-  iot_online();                 // report status to IoT engine
+  //  iot_online();                 // report status to IoT engine
 }
 
 
@@ -1284,7 +1322,7 @@ void disableWebServer () {
   Serial.println(F("Stopping webserver"));
 #endif
 
-  server.stop();  // disable server not ot affect measurements
+  server.stop();  // disable server not to affect measurements
   tHandleClients.disable();
 }
 
@@ -1302,9 +1340,9 @@ void disableWebServer () {
 */
 
 StatusRequest *networkReady;      // a pointer to the Status Request to be used to initiate NTP and IOT updates
-                                  // depending on the mode (running as AP or connected to one), all the NTP and IOT
-                                  // updates will be waiting for a confirmation that network connectivity is up and running
-                                  // In AP mode, only watering should be done since there is no NTP or IOT updates
+// depending on the mode (running as AP or connected to one), all the NTP and IOT
+// updates will be waiting for a confirmation that network connectivity is up and running
+// In AP mode, only watering should be done since there is no NTP or IOT updates
 
 void ticker() {
 #ifdef _DEBUG_ || _TEST_
@@ -1315,13 +1353,15 @@ void ticker() {
   Serial.println();
   time_t tnow = myTZ.toLocal( now() );
   Serial.print(F("Current local time: ")); printTime(DateTime(tnow)); Serial.println();
+  Serial.print(F("Connected to AP: ")); Serial.println(connectedToAP);
+  Serial.print(F("Running   as AP: ")); Serial.println(runningAsAP);
 
-//  resetDevice();
+  //  resetDevice();
 #endif
 
   tickTime = now();                     // This is when the tick occurred
   isNight();                            // Update the static nightMode flag
-  
+
   // to-do: figure out how to disable and re-enable webserver. so far it seems it loses ability to service requests once disabled
   // disableWebServer();
 
@@ -1336,7 +1376,7 @@ void ticker() {
     tConnected.waitFor( &wateringDone, TASK_SECOND, TASK_FOREVER );
     networkReady = tConnected.getInternalStatusRequest();
   }
-
+  //  tPostWater.waitFor( networkReady );   // Task initiating special functions after the watering is done and network re-connected
   tIotReport.waitFor( networkReady );   // server will restart whe IoT report is ready
 
 
@@ -1345,10 +1385,17 @@ void ticker() {
   }
 
   if ( parameters.powersave ) {
-    tSleep.waitForDelayed( networkReady, coldBoot ? CONFIG_DELAY : SLEEP_TOUT, TASK_ONCE );  // use special CONFIG_DELAY sleep delay on the first iteration allocting 
-                                                                                             // additional time for configuration updates after reset
+    tSleep.waitForDelayed( networkReady, coldBoot ? CONFIG_DELAY : SLEEP_TOUT, TASK_ONCE );  // use special CONFIG_DELAY sleep delay on the first iteration allocting
+    // additional time for configuration updates after reset
     coldBoot = false;
   }
+}
+
+/**
+
+*/
+void postWaterCallback() {
+  enableWebServer();
 }
 
 /**
@@ -1430,8 +1477,8 @@ void ntpTOut() {
 }
 
 /**
-  Soft AP timeout - at this point device has no connectivity and will reset itsef 
-  after 2 ticker intervals 
+  Soft AP timeout - at this point device has no connectivity and will reset itsef
+  after 2 ticker intervals
 */
 void serverTOut() {
 
@@ -1468,8 +1515,8 @@ void onDisconnected(const WiFiEventStationModeDisconnected & event) {
 }
 
 /**
- * Initiates a task which tries to re-connect to the Access Point in the event of disconnect
- */
+   Initiates a task which tries to re-connect to the Access Point in the event of disconnect
+*/
 void initiate_reconnect() {
   if ( connectedToAP ) {
 
@@ -1525,13 +1572,13 @@ void connectedChk() {
 
   if (WiFi.status() == WL_CONNECTED) {
     connectedToAP = true;
-    tTimeout.disable();
+    //    tTimeout.disable();
     tConnected.disable();
     tEnforcer.disable();
-    
+
 #ifdef _DEBUG_
     Serial.print(millis());
-    Serial.println(F("Successfully reconnected"));
+    Serial.println(F(": Successfully reconnected"));
 #endif
 
     return;
@@ -1539,43 +1586,31 @@ void connectedChk() {
 
   if ( tConnected.isFirstIteration() ) {
     connectedToAP = false;
-    WiFi.hostname(CHost);
-    WiFi.mode(WIFI_STA);
-    //    WiFi.persistent (false);
-    yield();
-    WiFi.begin(parameters.ssid, parameters.pwd);
-    yield();
-
-    // set timeout
-    tTimeout.set(CONNECT_TIMEOUT * TASK_SECOND, TASK_ONCE, &connectedChkTOut);
-    tTimeout.enableDelayed();
+    initiate_wifi_connection();
 
     tSleep.delay();
     return;
   }
-}
 
+  if ( tConnected.getRunCounter() % 5 == 0 ) {
+    WiFi.disconnect();
+    yield();
+    initiate_wifi_connection();
+  }
 
-/**
-  Reconnection attempts timeout
-  Device will continue operating, but a delayed reset will be attempted
-  to reconnect according to parameters
-*/
-void connectedChkTOut () {
+  if ( tConnected.isLastIteration() ) {
 
 #ifdef _DEBUG_
-  Serial.print(millis());
-  Serial.println(F(": connectedChkTOut."));
+    Serial.print(millis());
+    Serial.println(F(": connectedChkTOut."));
 #endif
 
-  connectedToAP = false;
-  tTimeout.disable();
-  tConnected.disable();
-  if ( !tEnforcer.isEnabled() ) {
-    tEnforcer.restartDelayed();
+    connectedToAP = false;
+    if ( !tEnforcer.isEnabled() ) {
+      tEnforcer.restartDelayed();
+    }
   }
 }
-
 
 /**
   Deep Sleep callback
@@ -1591,7 +1626,7 @@ void sleepCallback() {
   iot_sleep();
 
   time_t tnow = now();
-  time_t ticker = TICKER / 1000UL;
+  time_t ticker = TICKER * TASK_MINUTE / 1000UL;
   time_t tdesired = tickTime - tickTime % ticker + ticker;  // align desired time with ticker interval (if ticker is 30 min, align with 30 min on the clock)
 
   if ( tdesired > tnow ) {
@@ -2276,6 +2311,10 @@ int waterParser (int aTag, char* buf, int len) {
       snprintf( buf, len, CHtmlInputText, parameters.wl_low);
       break;
 
+    case 22: //0022-PING
+      snprintf( buf, len, CHtmlInputText, parameters.ping_interval);
+      break;
+
     default:
       buf[0] = 0;
       return 0;
@@ -2313,6 +2352,23 @@ int networkParser (int aTag, char* buf, int len) {
       s += ">Always On</option><option value=\"save\"";
       if ( parameters.powersave ) s += " selected";
       s += ">Power Saving</option>";
+      snprintf( buf, len, "%s", s.c_str());
+      break;
+
+    case 10: //0010-NTPSEERVER
+      //    <input type="text" value="ntp.nist.gov"
+      snprintf( buf, len, "<input type=\"text\" value=\"%s\"", parameters.ntp_server);
+      break;
+
+    case 11: //0011-LEDUSE
+      //    <option value="0" selected>Daylight</option><option value="1">Always</option><option value="2">Never</option>
+      s = "<option value=\"0\"";
+      if ( parameters.led_use == 0 ) s += " selected";
+      s += ">Daylight</option><option value=\"1\"";
+      if ( parameters.led_use == 1 ) s += " selected";
+      s += ">Always</option><option value=\"2\"";
+      if ( parameters.led_use == 2 ) s += " selected";
+      s += ">Never</option>";
       snprintf( buf, len, "%s", s.c_str());
       break;
 
@@ -2444,7 +2500,7 @@ void handleConfnetworksave() {
   isNight();
   led(LEDON, LEDON, LEDON);
 
-  if ( server.args() == 7 && server.uri() == "/confnetworksave" ) {
+  if ( server.args() == 9 && server.uri() == "/confnetworksave" ) {
 
     pageLoaded.setWaiting();
     tReset.waitFor(&pageLoaded);
@@ -2458,6 +2514,9 @@ void handleConfnetworksave() {
     strncpy(temp.pwd, server.arg("pwd").c_str(), 65);
     strncpy(temp.ssid_ap, server.arg("ssidap").c_str(), 32);
     strncpy(temp.pwd_ap, server.arg("pwdap").c_str(), 65);
+
+    strncpy(temp.ntp_server, server.arg("ntp").c_str(), 32);
+    temp.led_use = server.arg("leds").toInt();
 
     if ( true ) { // Replace with real validation
       cpParams( (byte*) &temp, (byte*) &parameters );
@@ -2493,7 +2552,7 @@ void handleConfwatersave() {
   isNight();
   led(LEDON, LEDON, LEDON);
 
-  if ( server.args() == 11 && server.uri() == "/confwatersave" ) {
+  if ( server.args() == 12 && server.uri() == "/confwatersave" ) {
 
     temp.low = server.arg("needwater").toInt();
     temp.watertime = server.arg("watertime").toInt();
@@ -2504,7 +2563,7 @@ void handleConfwatersave() {
     temp.wakeup = server.arg("wakeup").toInt();
     temp.wkendadj = server.arg("weekendadj").toInt();
     temp.wl_depth = server.arg("wldepth").toInt();
-    temp.wl_low = server.arg("minlevel").toInt();
+    temp.ping_interval = server.arg("ping").toInt();
 
     // ======================================
     //  BIG TO DO: Parameter validation
@@ -2516,6 +2575,7 @@ void handleConfwatersave() {
 
       server.send(200, "text/html", CSaved);
       isNight();
+      tTicker.setInterval( parameters.ping_interval * TASK_MINUTE );
     }
     else {
       server.send(500, "text/plain", F("Invalid Parameters"));
@@ -2585,8 +2645,8 @@ void configurePins() {
 }
 
 /**
- * This is the main setup() method called at the startup
- */
+   This is the main setup() method called at the startup
+*/
 void setup() {
 #ifdef _DEBUG_ || _TEST_
   Serial.begin(74880);
@@ -2678,15 +2738,22 @@ void setup() {
 }
 
 /**
- * Main loop. When using TaskScheduler only execute() method
- * should be located there
- */
+   Main loop. When using TaskScheduler only execute() method
+   should be located there
+*/
 void loop() {
   ts.execute();
 }
 
-#ifdef _DEBUG_
+//#ifdef _DEBUG_
 // ====================== FSBrowse code ========================
+
+/**
+   This code is borrowed from the FSBrowse example (esp8266 library examples)
+   and is used to upload updated HTML files directly to esp's file system,
+   and download the watering log
+*/
+
 
 File fsUploadFile;
 void handleFileList() {
@@ -2767,7 +2834,7 @@ void handleFileUpload() {
   }
 }
 
-#endif
+//#endif
 //==========================================================================
 
 
@@ -2790,8 +2857,8 @@ unsigned int blynk_port = 8080;
 
 
 /**
- * http request method for sending REST requests
- */
+   http request method for sending REST requests
+*/
 WiFiClient blynk_client;
 
 bool httpRequest(const String & method,
@@ -2892,8 +2959,8 @@ void iot_sleep() {
 }
 
 /**
- * generic function for updating blynk status line (Virtual pin 2)
- */
+   generic function for updating blynk status line (Virtual pin 2)
+*/
 void iot_status_update( String& aStatus) {
   if ( connectedToAP ) {
 #ifdef _IOT_BLYNK_
