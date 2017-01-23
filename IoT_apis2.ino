@@ -2845,16 +2845,6 @@ void handleFileUpload() {
 // IoT Blynk specific http aREST code
 // ==================================
 
-#ifdef _DEBUG_ || _TEST_
-const char blynk_auth[] = "ecaf415310ba40648092da105b1ee22c";
-const char* blynk_host = "blynk-cloud.com";
-unsigned int blynk_port = 8080;  // to test error handdling
-#else
-const char blynk_auth[] = "9955f87265f04846a680753c5d787fd0";
-const char* blynk_host = "blynk-cloud.com";
-unsigned int blynk_port = 8080;
-#endif
-
 
 /**
    http request method for sending REST requests
