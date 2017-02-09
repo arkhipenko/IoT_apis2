@@ -1,8 +1,8 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.0.5
-   Parameters Version 02
+   Code Version 1.0.6
+   Parameters Version 03
 
   Change Log:
   2016-11-29
@@ -42,12 +42,15 @@
   2017-01-21:
     v1.0.5 - programming: hide WiFi settings in the header file outside of github (for publishing)
 
+  2017-02-07:
+    v1.0.6 - bug: use dynamic measurement interval instead of the constant
+
   ----------------------------------------*/
 
 // TEST/DEBUG defines
 // ------------------
-#define _DEBUG_
-#define _TEST_
+//#define _DEBUG_
+//#define _TEST_
 
 // IoT framework selection
 // -----------------------
@@ -196,9 +199,9 @@
 
 // EEPROM token for parameters
 #ifdef _TEST_
-const char *CToken =  "APIS00\0"; // Eeprom token: Automatic Plant Irrigation System (for testing)
+const char *CToken =  "APIS03\0"; // Eeprom token: Automatic Plant Irrigation System (for testing)
 #else
-const char *CToken =  "APIS02\0"; // Eeprom token: Automatic Plant Irrigation System
+const char *CToken =  "APIS03\0"; // Eeprom token: Automatic Plant Irrigation System
 #endif
 //const char *CSsid  =  "wifi_network";
 //const char *CPwd   =  "wifi_password";
@@ -1261,6 +1264,8 @@ void cfgFinish() {  // WiFi config successful
   tTicker.setInterval( parameters.ping_interval * TASK_MINUTE );
   tTicker.restartDelayed( TASK_SECOND * ADC_SETTLE_TOUT );  // give watering 10 seconds stabilize ADC after LED use
 
+  tEnforcer.setInterval( parameters.ping_interval * TASK_MINUTE * 2 );
+
   //  iot_online();                 // report status to IoT engine
 }
 
@@ -1626,7 +1631,8 @@ void sleepCallback() {
   iot_sleep();
 
   time_t tnow = now();
-  time_t ticker = TICKER * TASK_MINUTE / 1000UL;
+  //  time_t ticker = TICKER * TASK_MINUTE / 1000UL;
+  time_t ticker = parameters.ping_interval * TASK_MINUTE / 1000UL;
   time_t tdesired = tickTime - tickTime % ticker + ticker;  // align desired time with ticker interval (if ticker is 30 min, align with 30 min on the clock)
 
   if ( tdesired > tnow ) {
@@ -2568,6 +2574,10 @@ void handleConfwatersave() {
     // ======================================
     //  BIG TO DO: Parameter validation
     // ======================================
+
+    if ( temp.ping_interval < 5 ) temp.ping_interval = 5; // no less than 5, minutes
+    if ( temp.ping_interval > 60 ) temp.ping_interval = 60; // no more than 1 hour (max sleep time for esp8266 is ~72 minutes)
+    
 
     if ( true ) { // replace with parameter validation result
       cpParams( (byte*) &temp, (byte*) &parameters );
