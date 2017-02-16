@@ -1,7 +1,7 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.0.6
+   Code Version 1.0.7
    Parameters Version 03
 
   Change Log:
@@ -44,6 +44,11 @@
 
   2017-02-07:
     v1.0.6 - bug: use dynamic measurement interval instead of the constant
+
+  2017-02-15:
+    v1.0.7 - feature: additional IoT update _before_watering (more accurate graph)
+           - bug: periodic ntp update scheduling fixed
+           - bug: reconnect cycle corrected from forever to timout
 
   ----------------------------------------*/
 
@@ -115,7 +120,7 @@
   so we need to *add* time to sleep request to compensate
   (Internal - External)/10 min = 27 sec / 600 sec = 0.045 seconds/second or 45000 uSec/sec of sleep
 */
-#define RTC_COMP        45000L        // microseconds of adjustment per second of sleep
+#define RTC_COMP        44475L        // microseconds of adjustment per 1 second of deep sleep to compensate for internal RTC error 
 
 // Watering parameter defaults (from APIS v1)
 // ---------------------------
@@ -199,7 +204,7 @@
 
 // EEPROM token for parameters
 #ifdef _TEST_
-const char *CToken =  "APIS03\0"; // Eeprom token: Automatic Plant Irrigation System (for testing)
+const char *CToken =  "APIS99\0"; // Eeprom token: Automatic Plant Irrigation System (for testing)
 #else
 const char *CToken =  "APIS03\0"; // Eeprom token: Automatic Plant Irrigation System
 #endif
@@ -420,6 +425,7 @@ time_t        tickTime;                             // Timestamp of the current 
 unsigned long epoch;                                // Time reported by NTP
 bool          nightMode = false;                    // Determine whether it is night once during tick, and then use the variable instead.
 unsigned long ledOnDuration, ledOffDuration;        // durations for LED on and off states - for fancy blinking
+bool          tickerIdleRun = true;                 // Indicates that a ticker run is idle (i.e. will do measurment w/o watering - for more accurate IoT update in time)
 
 // Execution
 bool connectedToAP = false;                         // if connected to AP, presumably can query and set the time via NTP
@@ -918,6 +924,8 @@ void doNtpUpdateInit() {
 #ifdef _DEBUG_
   Serial.print(millis());
   Serial.println(F(": doNtpUpdateInit."));
+  Serial.print(F("connectedToAP="));
+  Serial.println(connectedToAP);
 #endif
 
   if ( connectedToAP ) {  // only if connected to wifi network
@@ -1335,6 +1343,7 @@ void disableWebServer () {
 /**
   THIS IS THE HEARTBEAT TASK:
   ===========================
+  ###########################
   Ticker periodically initiates a sequence of events for watering and iot reporting.
 
   Current sequence of events:
@@ -1378,7 +1387,7 @@ void ticker() {
 
   networkReady = &wateringDone;
   if ( parameters.is_ap == 0 && !runningAsAP ) {
-    tConnected.waitFor( &wateringDone, TASK_SECOND, TASK_FOREVER );
+    tConnected.waitFor( &wateringDone, TASK_SECOND, CONNECT_TIMEOUT );
     networkReady = tConnected.getInternalStatusRequest();
   }
   //  tPostWater.waitFor( networkReady );   // Task initiating special functions after the watering is done and network re-connected
@@ -1386,7 +1395,7 @@ void ticker() {
 
 
   if ( !(tTicker.isFirstIteration() && hasNtp) ) { // No need to run another ntp update right after the first one if ntp information was obtained
-    tNtpUpdater.waitFor( networkReady ); // update NTP
+    tNtpUpdater.waitFor( networkReady, NTPUPDT_INTRVL, NTP_TIMEOUT ); // update NTP
   }
 
   if ( parameters.powersave ) {
@@ -1882,7 +1891,8 @@ void measureCallback() {
     if (!tWater.isEnabled()) {
       tWater.setInterval( parameters.watertime * TASK_MINUTE );
       tWater.setIterations( parameters.retries * 2 );
-      tWater.restart();
+      tWater.restartDelayed(ADC_SETTLE_TOUT * TASK_SECOND);
+      iot_report();
     }
     return;
   }
@@ -2577,7 +2587,7 @@ void handleConfwatersave() {
 
     if ( temp.ping_interval < 5 ) temp.ping_interval = 5; // no less than 5, minutes
     if ( temp.ping_interval > 60 ) temp.ping_interval = 60; // no more than 1 hour (max sleep time for esp8266 is ~72 minutes)
-    
+
 
     if ( true ) { // replace with parameter validation result
       cpParams( (byte*) &temp, (byte*) &parameters );
@@ -3000,6 +3010,8 @@ void iot_report() {
     String putData = String("[\"") + currentHumidity + "\"]";
     String response;
 
+    yield();
+
     if (httpRequest(String("PUT /") + blynk_auth + "/update/V0", putData, response)) {
       if (response.length() != 0) {
 
@@ -3011,6 +3023,9 @@ void iot_report() {
     }
 
     putData = String("[\"") + currentWaterLevel + "\"]";
+
+    yield();
+    
     if (httpRequest(String("PUT /") + blynk_auth + "/update/V1", putData, response)) {
       if (response.length() != 0) {
 
@@ -3022,6 +3037,9 @@ void iot_report() {
     }
 
     putData = String("[\"") + (hasLeaked() ? "255" : "0") + "\"]";
+
+    yield();
+    
     if (httpRequest(String("PUT /") + blynk_auth + "/update/V3", putData, response)) {
       if (response.length() != 0) {
 
