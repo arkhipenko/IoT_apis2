@@ -1,7 +1,7 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.0.7
+   Code Version 1.0.8
    Parameters Version 03
 
   Change Log:
@@ -48,7 +48,12 @@
   2017-02-15:
     v1.0.7 - feature: additional IoT update _before_watering (more accurate graph)
            - bug: periodic ntp update scheduling fixed
-           - bug: reconnect cycle corrected from forever to timout
+           - bug: reconnect cycle corrected from forever to timeout
+
+  2017-02-24:
+    v1.0.8 - feature: RTC adjustment is self-calibrating based on the actual and NTP times
+           - bug: sleep delay is extended only if remaining delay is less than requested
+           - dependency: TaskScheduler 2.3.0
 
   ----------------------------------------*/
 
@@ -120,7 +125,6 @@
   so we need to *add* time to sleep request to compensate
   (Internal - External)/10 min = 27 sec / 600 sec = 0.045 seconds/second or 45000 uSec/sec of sleep
 */
-#define RTC_COMP        44475L        // microseconds of adjustment per 1 second of deep sleep to compensate for internal RTC error 
 
 // Watering parameter defaults (from APIS v1)
 // ---------------------------
@@ -176,7 +180,6 @@
 #define CONNECT_INTRVL  2000  // check every 2 seconds
 #define NTPUPDT_INTRVL  2000  // check every 2 seconds
 
-
 // PINs
 // ----
 // Moisture probe analog pin
@@ -204,7 +207,7 @@
 
 // EEPROM token for parameters
 #ifdef _TEST_
-const char *CToken =  "APIS99\0"; // Eeprom token: Automatic Plant Irrigation System (for testing)
+const char *CToken =  "APIS00\0"; // Eeprom token: Automatic Plant Irrigation System (for testing)
 #else
 const char *CToken =  "APIS03\0"; // Eeprom token: Automatic Plant Irrigation System
 #endif
@@ -362,12 +365,14 @@ typedef struct {
 TParameters parameters;
 
 typedef struct {
-  unsigned long magic;      // token: 1234567890 for validation
-  unsigned long ccode;      // control code for the magic number = ~magic
-  unsigned long ttime;      // unix time at the time of reset
-  bool          hasntp;     // was the time ntp driven?
-  int           sleep_mult; // sleep multiplyer, not currently used
-  // Total of 16 bytes
+  unsigned long magic;      // 4b: token: 1234567890 for validation
+  unsigned long ccode;      // 4b: control code for the magic number = ~magic
+  unsigned long ttime;      // 4b: unix time at the time of reset
+  bool          hasntp;     // 2b: was the time ntp driven?
+  unsigned long ntptime;    // 4b: epoch time at the last NTP update
+  long          rtccomp;    // 4b: current rtc_comp value
+  bool          rtcreq;     // 2b: rtc recalc requested
+  // Total of 22 bytes
 } TTimeStored;
 
 TTimeStored   time_restore;
@@ -431,6 +436,8 @@ bool          tickerIdleRun = true;                 // Indicates that a ticker r
 bool connectedToAP = false;                         // if connected to AP, presumably can query and set the time via NTP
 bool runningAsAP   = false;                         // running as AP, internet is not available, no correct time is available
 bool hasNtp;                                        // Indicates that device was able to update time from NTP servers at some point
+long rtcComp;                                       // dynamically calculated microseconds of adjustment per 1 second of deep sleep to compensate for internal RTC error
+bool rtcCompRequested;
 
 // WiFi specific events
 WiFiEventHandler disconnectedEventHandler;
@@ -817,8 +824,8 @@ void cfgInit() {  // Initiate connection
   Serial.print(F("PWD : ")); Serial.println(parameters.pwd_ap);
 #endif
 
-  runningAsAP = false;      // true if setting up as an Access Point was successful
-  connectedToAP = false;    // true if connection to the wireless network of choice was successful
+  runningAsAP   = false;      // true if setting up as an Access Point was successful
+  connectedToAP = false;      // true if connection to the wireless network of choice was successful
 
   if (parameters.is_ap == 0) { // If not explicitly requested to be an Access Point
     // attempt to connect to an exiting AP
@@ -993,31 +1000,47 @@ void cfgChkNTP() {
       udp.stop();
       doNtpUpdateInit();
     }
-    else {
-      if ( doNtpUpdateCheck()) {
-        doSetTime(epoch);
+    if ( doNtpUpdateCheck() ) {
+      recalcRtcComp();
+      doSetTime(epoch);
 
 #ifdef _DEBUG_
-        Serial.println(F("NTP Update successful"));
+      Serial.println(F("NTP Update successful"));
 #endif
 
-        bootTime = now();
-        hasNtp = true;
+      bootTime = now();
+      hasNtp = true;
 
-        tLedBlink.disable();
-        tTimeout.disable();
-        tConfigure.yieldOnce(&cfgFinish);
-        udp.stop();
-        isNight();
-      }
-      else {
-        //      delay (100);
-        // delay commented out sincce TaskScheduler yields on every pass
-      }
+      tLedBlink.disable();
+      tTimeout.disable();
+      tConfigure.yieldOnce(&cfgFinish);
+      udp.stop();
+      isNight();
+    }
+    else {
+      //      delay (100);
+      // delay commented out sincce TaskScheduler yields on every pass
     }
   }
 }
 
+
+void recalcRtcComp() {
+
+  if ( hasNtp && rtcCompRequested) {
+    long d = (long) getTime() - epoch;
+    long D = epoch - time_restore.ntptime;
+    rtcComp = time_restore.rtccomp + ( d * 1000000L / D );
+    rtcCompRequested = false;
+
+#ifdef _DEBUG_
+    Serial.println(F("Recalculated RTC comp"));
+    Serial.print(F("d = ")); Serial.println(d);
+    Serial.print(F("D = ")); Serial.println(D);
+    Serial.print(F("rtc_comp = ")); Serial.println(rtcComp);
+#endif
+  }
+}
 
 #ifdef _DEBUG_ || _TEST_
 /**
@@ -1057,12 +1080,10 @@ void doSetTime(unsigned long aTime) {
   Serial.println(F(": doSetTime."));
 #endif
 
-  //  rtc.begin();
   rtc.adjust( DateTime(aTime) );
   setTime( rtc.now().unixtime() );
 
 #ifdef _DEBUG_
-  //  delay(1000);
   printTime(now());
   Serial.println();
 #endif
@@ -1155,6 +1176,7 @@ void ntpUpdate() {
       doNtpUpdateInit();
     }
     if ( doNtpUpdateCheck() ) {
+      recalcRtcComp();
       doSetTime(epoch);
       tNtpUpdater.disable();
       udp.stop();
@@ -1171,6 +1193,7 @@ void ntpUpdate() {
     udp.stop();
   }
 }
+
 
 
 /**
@@ -1602,7 +1625,7 @@ void connectedChk() {
     connectedToAP = false;
     initiate_wifi_connection();
 
-    tSleep.delay();
+    //    tSleep.delay();
     return;
   }
 
@@ -1645,10 +1668,15 @@ void sleepCallback() {
   time_t tdesired = tickTime - tickTime % ticker + ticker;  // align desired time with ticker interval (if ticker is 30 min, align with 30 min on the clock)
 
   if ( tdesired > tnow ) {
-    saveTimeToRTC( tdesired );
 
     unsigned long delta = tdesired - tnow;
-    if ( delta < ticker / 2 ) delta += ticker;
+    if ( delta < ticker / 2 ) {
+      delta += ticker;
+      tdesired += ticker;
+    }
+
+    time_restore.rtcreq = true;
+    saveTimeToRTC( tdesired );
 
     ts.disableAll();
     WiFi.disconnect();
@@ -1656,12 +1684,12 @@ void sleepCallback() {
 
 #ifdef _DEBUG_ || _TEST_
     Serial.println(F("Storing TTimeStored structure to RTC memory"));
-    Serial.print(F("Magic number:")); Serial.println(time_restore.magic);
-    Serial.print(F("ttime number:")); Serial.println(time_restore.ttime);
-    Serial.print(F("Tick epoch time:")); Serial.println(tickTime);
-    Serial.print(F("Now  epoch time:")); Serial.println(tnow);
-    Serial.print(F("ticket interval:")); Serial.println(ticker);
-    Serial.print(F("sleep interval:")); Serial.println(delta);
+    Serial.print(F("Magic number      :")); Serial.println(time_restore.magic);
+    Serial.print(F("ttime (desired)   :")); Serial.println(time_restore.ttime);
+    Serial.print(F("Epoch time at Tick:")); Serial.println(tickTime);
+    Serial.print(F("Epoch time Now    :")); Serial.println(tnow);
+    Serial.print(F("Ticket interval   :")); Serial.println(ticker);
+    Serial.print(F("Sleep interval    :")); Serial.println(delta);
 
     Serial.flush();
     delay(10);
@@ -1671,10 +1699,10 @@ void sleepCallback() {
     // !-------------------!-------------------------------------------!
     // tick                tnow                                       tick+interval
     // <--- tnow - tick --> <               tick+interval
-    time_restore.sleep_mult = 0; // no additional sleep
-    ESP.deepSleep( delta * ( 1000000UL + RTC_COMP ), RF_NO_CAL );
-    yield();
-    //    delay(100);
+
+    ESP.deepSleep( delta * ( 1000000UL + rtcComp ), RF_NO_CAL );
+    //    yield();
+    //    delay(1000);
   }
   else {
     resetDevice();
@@ -1691,10 +1719,14 @@ void saveTimeToRTC (unsigned long aUt) {
   time_restore.ccode = ~time_restore.magic;
   time_restore.ttime = aUt;
   time_restore.hasntp = hasNtp;
+  time_restore.ntptime = getTime();
+  time_restore.rtccomp = rtcComp;
   byte *p = (byte*) &time_restore;
-  ESP.rtcUserMemoryWrite( 64, (uint32_t*) p, sizeof(TTimeStored) );
+//  ESP.rtcUserMemoryWrite( 64, (uint32_t*) p, sizeof(TTimeStored) );
+  ESP.rtcUserMemoryWrite( 0, (uint32_t*) p, sizeof(TTimeStored) );
   p = (byte*) &water_log;
-  ESP.rtcUserMemoryWrite( 128, (uint32_t*) p, sizeof(TWaterLog) );
+//  ESP.rtcUserMemoryWrite( 128, (uint32_t*) p, sizeof(TWaterLog) );
+  ESP.rtcUserMemoryWrite( 64, (uint32_t*) p, sizeof(TWaterLog) );
 }
 
 /**
@@ -1708,12 +1740,16 @@ void resetDevice() {
   Serial.println(F(": resetDevice."));
 #endif
 
+  time_restore.rtcreq = false;
   saveTimeToRTC(now());
 
 #ifdef _DEBUG_ || _TEST_
   Serial.println(F("Storing TTimeStored structure to RTC memory"));
-  Serial.print(F("Magic number:")); Serial.println(time_restore.magic);
-  Serial.print(F("ttime number:")); Serial.println(time_restore.ttime);
+  Serial.print(F("Magic number      :")); Serial.println(time_restore.magic);
+  Serial.print(F("ttime (desired)   :")); Serial.println(time_restore.ttime);
+  Serial.print(F("Epoch time at Tick:")); Serial.println(tickTime);
+  Serial.print(F("Epoch time Now    :")); Serial.println(now());
+
   Serial.flush();
   delay(10);
   Serial.end();
@@ -1723,7 +1759,7 @@ void resetDevice() {
   WiFi.disconnect();
   SPIFFS.end();
   ESP.reset(); // If device cannot reconnect to the AP, it is reset to try again and/or become an Access Point
-  delay(100);
+  //  delay(100);
 }
 
 
@@ -2037,7 +2073,15 @@ void handleClientCallback() {
   server.handleClient();
   if ( server.client() ) {
     tHandleClients.forceNextIteration();
-    tSleep.delay(SLEEP_TOUT_CONN);
+    long d = ts.timeUntilNextIteration (tSleep);
+
+#ifdef _DEBUG_
+    Serial.print(millis());
+    Serial.print(F(": handleClientCallback. Rem. time to sleep = ")); Serial.println(d);
+#endif
+
+    if ( d > 0 && d < SLEEP_TOUT_CONN )
+      tSleep.delay(SLEEP_TOUT_CONN);
   }
   else {
     tHandleClients.delay();
@@ -2685,11 +2729,16 @@ void setup() {
   wl.initialize();
   hum.initialize();
 
+  rtcComp      = 0;
+  rtcCompRequested = false;
+  time_restore.ntptime = 0;   // this field will only be populated in case of sleep
+
   hasNtp = false;
   coldBoot = true;
   if ( ESP.getResetReason() != CWakeReasonReset ) {
     byte *p = (byte *) &time_restore;
-    if ( ESP.rtcUserMemoryRead( 64, (uint32_t*) p, sizeof(TTimeStored) )) {
+    //    if ( ESP.rtcUserMemoryRead( 64, (uint32_t*) p, sizeof(TTimeStored) )) {
+    if ( ESP.rtcUserMemoryRead( 0, (uint32_t*) p, sizeof(TTimeStored) )) {
 
 
 #ifdef _DEBUG_ || _TEST_
@@ -2697,6 +2746,7 @@ void setup() {
       Serial.print(F("Magic number:")); Serial.println(time_restore.magic);
       Serial.print(F("ttime number:")); Serial.println(time_restore.ttime);
       Serial.print(F("has NTP     :")); Serial.println(time_restore.hasntp);
+      Serial.print(F("rtc_comp    :")); Serial.println(time_restore.rtccomp);
 #endif
 
       if ( time_restore.magic == MAGIC_NUMBER && time_restore.ccode == ~(MAGIC_NUMBER) ) {
@@ -2704,9 +2754,12 @@ void setup() {
 
         doSetTime(time_restore.ttime + WAKE_DELAY);
         hasNtp = time_restore.hasntp;
+        rtcComp = time_restore.rtccomp;
+        rtcCompRequested = time_restore.rtcreq;
 
         p = (byte *) &water_log;
-        ESP.rtcUserMemoryRead( 128, (uint32_t*) p, sizeof(TWaterLog) );
+//        ESP.rtcUserMemoryRead( 128, (uint32_t*) p, sizeof(TWaterLog) );
+        ESP.rtcUserMemoryRead( 64, (uint32_t*) p, sizeof(TWaterLog) );
 
 #ifdef _DEBUG_ || _TEST_
         Serial.println(F("Time and Water log restored from RTC memory"));
@@ -2971,7 +3024,7 @@ void iot_sleep() {
 /**
    generic function for updating blynk status line (Virtual pin 2)
 */
-void iot_status_update( String& aStatus) {
+void iot_status_update( String & aStatus) {
   if ( connectedToAP ) {
 #ifdef _IOT_BLYNK_
 
@@ -3025,7 +3078,7 @@ void iot_report() {
     putData = String("[\"") + currentWaterLevel + "\"]";
 
     yield();
-    
+
     if (httpRequest(String("PUT /") + blynk_auth + "/update/V1", putData, response)) {
       if (response.length() != 0) {
 
@@ -3039,7 +3092,7 @@ void iot_report() {
     putData = String("[\"") + (hasLeaked() ? "255" : "0") + "\"]";
 
     yield();
-    
+
     if (httpRequest(String("PUT /") + blynk_auth + "/update/V3", putData, response)) {
       if (response.length() != 0) {
 
