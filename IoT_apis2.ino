@@ -1003,6 +1003,7 @@ void cfgChkNTP() {
     if ( doNtpUpdateCheck() ) {
       recalcRtcComp();
       doSetTime(epoch);
+      time_restore.ntptime = epoch;
 
 #ifdef _DEBUG_
       Serial.println(F("NTP Update successful"));
@@ -1178,6 +1179,7 @@ void ntpUpdate() {
     if ( doNtpUpdateCheck() ) {
       recalcRtcComp();
       doSetTime(epoch);
+      time_restore.ntptime = epoch;
       tNtpUpdater.disable();
       udp.stop();
 #ifdef _DEBUG_
@@ -1719,13 +1721,13 @@ void saveTimeToRTC (unsigned long aUt) {
   time_restore.ccode = ~time_restore.magic;
   time_restore.ttime = aUt;
   time_restore.hasntp = hasNtp;
-  time_restore.ntptime = getTime();
+  //  time_restore.ntptime = getTime();
   time_restore.rtccomp = rtcComp;
   byte *p = (byte*) &time_restore;
-//  ESP.rtcUserMemoryWrite( 64, (uint32_t*) p, sizeof(TTimeStored) );
+  //  ESP.rtcUserMemoryWrite( 64, (uint32_t*) p, sizeof(TTimeStored) );
   ESP.rtcUserMemoryWrite( 0, (uint32_t*) p, sizeof(TTimeStored) );
   p = (byte*) &water_log;
-//  ESP.rtcUserMemoryWrite( 128, (uint32_t*) p, sizeof(TWaterLog) );
+  //  ESP.rtcUserMemoryWrite( 128, (uint32_t*) p, sizeof(TWaterLog) );
   ESP.rtcUserMemoryWrite( 64, (uint32_t*) p, sizeof(TWaterLog) );
 }
 
@@ -2710,6 +2712,9 @@ void configurePins() {
 
 /**
    This is the main setup() method called at the startup
+
+   S E T U P
+
 */
 void setup() {
 #ifdef _DEBUG_ || _TEST_
@@ -2758,7 +2763,7 @@ void setup() {
         rtcCompRequested = time_restore.rtcreq;
 
         p = (byte *) &water_log;
-//        ESP.rtcUserMemoryRead( 128, (uint32_t*) p, sizeof(TWaterLog) );
+        //        ESP.rtcUserMemoryRead( 128, (uint32_t*) p, sizeof(TWaterLog) );
         ESP.rtcUserMemoryRead( 64, (uint32_t*) p, sizeof(TWaterLog) );
 
 #ifdef _DEBUG_ || _TEST_
