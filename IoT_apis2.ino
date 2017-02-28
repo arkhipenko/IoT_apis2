@@ -1,7 +1,7 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.0.8
+   Code Version 1.0.9
    Parameters Version 03
 
   Change Log:
@@ -54,6 +54,9 @@
     v1.0.8 - feature: RTC adjustment is self-calibrating based on the actual and NTP times
            - bug: sleep delay is extended only if remaining delay is less than requested
            - dependency: TaskScheduler 2.3.0
+
+  2017-02-29:
+    v1.0.9 - feature: allow 5 min later/earlier for "isNight" determination
 
   ----------------------------------------*/
 
@@ -114,7 +117,8 @@
 #define PING_TIMEOUT    2000UL        // pinf timeout in uS - (about 34 cm of distance measurement)
 #define HALF_HOUR       1800          // seconds
 #define SD3             10            // SD3 pin on NodeMCU is GPIO10
-#define ADC_SETTLE_TOUT 10            // 10 seconds to let ADC settle after all LEDs are off
+#define ADC_SETTLE_TOUT 10            // seconds to let ADC settle after all LEDs are off
+#define NIGHT_TOLERANCE 5             // minutes after night start and before it ends
 
 /*
   Compensating factor for imperfections of built-in RTC:
@@ -636,8 +640,12 @@ bool isNight() {
 
     time_t tnow = myTZ.toLocal( now() );
 
-    int hr = hour(tnow);
-    int wkp = parameters.wakeup;
+//  Allow 5 min "grace" period for wakeup/go to sleep due to clock imperfections
+//  Defined as NIGHT_TOLERANCE
+
+    int hr = hour(tnow) * 60 + minute(tnow);
+    int wkp = parameters.wakeup * 60 - NIGHT_TOLERANCE; // wakep could occur up to 5 min earlier
+    int gts = parameters.gotosleep * 60 + NIGHT_TOLERANCE; // go to sleep could occur up to 5 min later
 
 #ifdef _DEBUG_
     //    Serial.print(millis());
@@ -647,8 +655,8 @@ bool isNight() {
 #endif
 
     //  Add adjusting hours to the wakeup time for Saturday and Sunday
-    if ( weekday(tnow) == dowSunday || weekday(tnow) == dowSaturday ) wkp += parameters.wkendadj;
-    nightMode = ( hr >= parameters.gotosleep || hr < wkp );
+    if ( weekday(tnow) == dowSunday || weekday(tnow) == dowSaturday ) wkp += parameters.wkendadj * 60;
+    nightMode = ( hr >= gts || hr < wkp );
 
 #ifdef _DEBUG_
     //    Serial.print(F("parameters.gotosleep = ")); Serial.println(parameters.gotosleep);
