@@ -1,7 +1,7 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.0.9
+   Code Version 1.1.0
    Parameters Version 03
 
   Change Log:
@@ -58,6 +58,10 @@
   2017-02-29:
     v1.0.9 - feature: allow 5 min later/earlier for "isNight" determination
 
+  2017-03-09:
+    v1.1.0 - feature: align ticker interval with respective real clock interval, e.g. if ticker interval in 30 minutes,
+             then each tick will align with full hour and half-hour time (11:00, 11:30, 12:00, etc)
+    
   ----------------------------------------*/
 
 // TEST/DEBUG defines
@@ -640,8 +644,8 @@ bool isNight() {
 
     time_t tnow = myTZ.toLocal( now() );
 
-//  Allow 5 min "grace" period for wakeup/go to sleep due to clock imperfections
-//  Defined as NIGHT_TOLERANCE
+    //  Allow 5 min "grace" period for wakeup/go to sleep due to clock imperfections
+    //  Defined as NIGHT_TOLERANCE
 
     int hr = hour(tnow) * 60 + minute(tnow);
     int wkp = parameters.wakeup * 60 - NIGHT_TOLERANCE; // wakep could occur up to 5 min earlier
@@ -1148,8 +1152,9 @@ bool doNtpUpdateCheck() {
 
 #ifdef _DEBUG_
     // print Unix time:
-    Serial.print(F("Unix time = "));
-    Serial.println(epoch);
+    Serial.print(F("NTP unix time    = ")); Serial.println(epoch);
+    time_t tnow = now();
+    Serial.print(F("System unix time = ")); Serial.println(tnow);
 #endif
     return (epoch != 0);
   }
@@ -1190,9 +1195,33 @@ void ntpUpdate() {
       time_restore.ntptime = epoch;
       tNtpUpdater.disable();
       udp.stop();
+
 #ifdef _DEBUG_
       Serial.println(F("NTP update successful"));
 #endif
+
+      //  Align ticker period to the respective closk period
+
+      long rest = ts.timeUntilNextIteration(tTicker);
+#ifdef _DEBUG_
+      Serial.print("Remaining time to tick = "); Serial.println(rest);
+#endif
+      if (rest > 0) {
+        time_t nxttick1 = now() + rest / 1000L;
+        time_t ticker = parameters.ping_interval * TASK_MINUTE / 1000L;
+        time_t nxttick2 = nxttick1 - nxttick1 % ticker;
+        time_t dly = (nxttick2 - now()) * 1000L;
+        while (dly < 0)
+          dly += ( parameters.ping_interval * TASK_MINUTE );
+        tTicker.delay( dly );
+
+#ifdef _DEBUG_
+        Serial.print("Original next tick, sec = "); Serial.println(nxttick1);
+        Serial.print("Adjusted next tick, sec = "); Serial.println(nxttick2);
+        Serial.print("Adjusted delay, ms      = "); Serial.println(dly);
+#endif
+      }
+
       if ( !hasNtp ) tTicker.restartDelayed( TASK_SECOND * ADC_SETTLE_TOUT );
       hasNtp = true;
       isNight();
@@ -1330,12 +1359,9 @@ void enableWebServer() {
   // Code below enables browsing, uploading and downloading files to the internal filesystem.
   // This code has been borrowed from the esp8266 examples
 
-#ifdef _DEBUG_
+
   // =============== FSBrowse code ====================
-  //SERVER INIT
-  //list directory
-  server.on("/list", HTTP_GET, handleFileList);
-  //load editor
+
   server.on("/edit", HTTP_GET, []() {
     if (!handleFileRead("/edit.htm")) server.send(404, "text/plain", "FileNotFound");
   });
@@ -1350,7 +1376,7 @@ void enableWebServer() {
   }, handleFileUpload);
 
   // ==================================================
-#endif
+
   server.begin();
 
   if ( connectedToAP ) tHandleClients.restart();
