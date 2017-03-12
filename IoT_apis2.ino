@@ -1,7 +1,7 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.1.0
+   Code Version 1.2.0
    Parameters Version 03
 
   Change Log:
@@ -61,7 +61,11 @@
   2017-03-09:
     v1.1.0 - feature: align ticker interval with respective real clock interval, e.g. if ticker interval in 30 minutes,
              then each tick will align with full hour and half-hour time (11:00, 11:30, 12:00, etc)
-    
+
+  2017-03-12:
+    v1.2.0 - feature: check for water leak in the bottom tray every 1 second during watering, and every 10 seconds during saturation.
+             Stop watering immediately as the leak is detected. 
+             
   ----------------------------------------*/
 
 // TEST/DEBUG defines
@@ -258,9 +262,6 @@ bool ledOnEnable();
 void ntpUpdate();
 
 void connectedChk();
-void waterCallback();
-bool waterOnenable();
-void waterOndisable();
 void measureCallback();
 void measureWL();
 bool measureWLOnEnable();
@@ -286,6 +287,7 @@ void resetDevice();
 void iot_report();
 
 void connectionEnforcer();
+void waterleakChecker();
 
 // Task Scheduling
 // ---------------
@@ -321,8 +323,9 @@ Task tMesrLevel     (WL_PERIOD, TASK_FOREVER, &measureWL, &ts, false, &measureWL
 Task tMesrMoisture  (TASK_SECOND, TASK_FOREVER, &measureMS, &ts, false, &measureMSOnEnable, &measureMSOnDisable);
 
 Task tWater         (TASK_IMMEDIATE, TASK_ONCE, &waterCallback, &ts, false, &waterOnEnable, &waterOnDisable);
+Task tLeakChecker   (TASK_SECOND, TASK_FOREVER, &waterleakChecker, &ts, false);
 
-Task tSleep         (&sleepCallback, &ts);
+Task tSleep          (&sleepCallback, &ts);
 
 Task tIotReport     (TASK_IMMEDIATE, TASK_ONCE, &iot_report, &ts);
 
@@ -2022,6 +2025,7 @@ void waterCallback() {
     ledOffDuration = ledOnDuration / 2;
     tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
     tLedBlink.enable();
+    tLeakChecker.setInterval(TASK_SECOND);
   }
   else { // even run
     motorOff();
@@ -2033,6 +2037,7 @@ void waterCallback() {
     ledOffDuration = TASK_SECOND / 4;
     tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
     tLedBlink.enable();
+    tLeakChecker.setInterval(TASK_SECOND * 10);
   }
 }
 
@@ -2056,6 +2061,8 @@ bool waterOnEnable() {
   water_log.hum_end = 0;
   water_log.wl_end = 0;
 
+  tLeakChecker.restart();
+
   return true;
 }
 
@@ -2075,6 +2082,7 @@ void waterOnDisable() {
   tMeasureRestart.disable();
   tLedBlink.disable();
   wateringDone.signal();
+  tLeakChecker.disable();
 
   if ( !SPIFFS.exists(logFileName) ) {
     File f = SPIFFS.open(logFileName, "w");
@@ -2089,6 +2097,12 @@ void waterOnDisable() {
     f.println(buf);
     f.close();
   }
+}
+
+
+void waterleakChecker() {
+  if ( !canWater() )
+    tWater.disable();
 }
 
 
