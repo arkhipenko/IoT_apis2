@@ -1,7 +1,7 @@
 /* -------------------------------------
   IoT enabled Automatic Plant Irrigation System - IOT APIS2
   Based on ESP8622 NODEMCU v2 dev kit chip
-   Code Version 1.2.0
+   Code Version 1.2.1
    Parameters Version 03
 
   Change Log:
@@ -64,8 +64,11 @@
 
   2017-03-12:
     v1.2.0 - feature: check for water leak in the bottom tray every 1 second during watering, and every 10 seconds during saturation.
-             Stop watering immediately as the leak is detected. 
-             
+             Stop watering immediately as the leak is detected.
+
+  2017-04-04:
+    v1.2.1 - bug: IoT report should be called before watering ADC settle delay. 
+    
   ----------------------------------------*/
 
 // TEST/DEBUG defines
@@ -86,8 +89,9 @@
 #define _TASK_STATUS_REQUEST  // Compile with support for StatusRequest functionality - triggering tasks on status change events in addition to time only
 //#define _TASK_WDT_IDS         // Compile with support for wdt control points and task ids
 //#define _TASK_LTS_POINTER     // Compile with support for local task storage pointer
-#define _TASK_PRIORITY          // Support for layered scheduling priority
+//#define _TASK_PRIORITY          // Support for layered scheduling priority
 //#define _TASK_MICRO_RES       // Support for microsecond resolutionMM
+//#define _TASK_DEBUG
 #include <TaskScheduler.h>
 
 #include <EEPROM.h>
@@ -1058,7 +1062,7 @@ void recalcRtcComp() {
   }
 }
 
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
 /**
    Print time in the YYYY-MM-DD HH-MM-SS format
 
@@ -1421,7 +1425,7 @@ StatusRequest *networkReady;      // a pointer to the Status Request to be used 
 // In AP mode, only watering should be done since there is no NTP or IOT updates
 
 void ticker() {
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
   Serial.println();
   Serial.print(millis());
   Serial.println(F(": TICKER"));
@@ -1721,7 +1725,7 @@ void sleepCallback() {
     WiFi.disconnect();
     SPIFFS.end();
 
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
     Serial.println(F("Storing TTimeStored structure to RTC memory"));
     Serial.print(F("Magic number      :")); Serial.println(time_restore.magic);
     Serial.print(F("ttime (desired)   :")); Serial.println(time_restore.ttime);
@@ -1782,7 +1786,7 @@ void resetDevice() {
   time_restore.rtcreq = false;
   saveTimeToRTC(now());
 
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
   Serial.println(F("Storing TTimeStored structure to RTC memory"));
   Serial.print(F("Magic number      :")); Serial.println(time_restore.magic);
   Serial.print(F("ttime (desired)   :")); Serial.println(time_restore.ttime);
@@ -1964,10 +1968,10 @@ void measureCallback() {
   // check if we can water now and not doing it already
   if (canWater() && currentHumidity > 0 && currentHumidity < parameters.low) {
     if (!tWater.isEnabled()) {
-      tWater.setInterval( parameters.watertime * TASK_MINUTE );
+      iot_report();
+      //      tWater.setInterval( parameters.watertime * TASK_SECOND );
       tWater.setIterations( parameters.retries * 2 );
       tWater.restartDelayed(ADC_SETTLE_TOUT * TASK_SECOND);
-      iot_report();
     }
     return;
   }
@@ -2023,8 +2027,6 @@ void waterCallback() {
     rgbRed = LEDOFF; rgbGreen = LEDOFF; rgbBlue = LEDON;
     ledOnDuration = TASK_SECOND / 4;
     ledOffDuration = ledOnDuration / 2;
-    tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
-    tLedBlink.enable();
     tLeakChecker.setInterval(TASK_SECOND);
   }
   else { // even run
@@ -2035,10 +2037,10 @@ void waterCallback() {
     rgbRed = LEDOFF; rgbGreen = LEDOFF; rgbBlue = LEDON;
     ledOnDuration = TASK_SECOND * 2;
     ledOffDuration = TASK_SECOND / 4;
-    tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
-    tLedBlink.enable();
     tLeakChecker.setInterval(TASK_SECOND * 10);
   }
+  tLedBlink.set(TASK_IMMEDIATE, TASK_FOREVER, &cfgLed, &ledOnEnable, &ledOnDisable);
+  tLedBlink.enable();
 }
 
 /**
@@ -2765,7 +2767,7 @@ void configurePins() {
 
 */
 void setup() {
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
   Serial.begin(74880);
   //  delay(5000);
 #endif
@@ -2794,7 +2796,7 @@ void setup() {
     if ( ESP.rtcUserMemoryRead( 0, (uint32_t*) p, sizeof(TTimeStored) )) {
 
 
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
       Serial.println(F("Read TTimeStored structure from RTC memory"));
       Serial.print(F("Magic number:")); Serial.println(time_restore.magic);
       Serial.print(F("ttime number:")); Serial.println(time_restore.ttime);
@@ -2814,7 +2816,7 @@ void setup() {
         //        ESP.rtcUserMemoryRead( 128, (uint32_t*) p, sizeof(TWaterLog) );
         ESP.rtcUserMemoryRead( 64, (uint32_t*) p, sizeof(TWaterLog) );
 
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
         Serial.println(F("Time and Water log restored from RTC memory"));
 #endif
 
@@ -2827,7 +2829,7 @@ void setup() {
   }
   else {
 
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
     Serial.println(F("Erased config set AutoConnect to false"));
 #endif
 
@@ -2839,7 +2841,7 @@ void setup() {
   checkUpdateTime();
   setSyncInterval(3600);      // Sync time every 1 hour with RTC
 
-#ifdef _DEBUG_ || _TEST_
+#if defined (_DEBUG_) || defined(_TEST_)
   Serial.println(F("IoT Plant Watering System"));
 #endif
 
@@ -2852,7 +2854,7 @@ void setup() {
   }
 
   // Indicate TEST mode by lighting upu LED pure white for 5 seconds
-#ifdef _TEST_ || _DEBUG_
+#if defined (_DEBUG_) || defined(_TEST_)
   led(LEDON, LEDON, LEDON);
   Serial.println(F("_TEST_ or _DEBUG_ - lights out"));
   delay(5000);
